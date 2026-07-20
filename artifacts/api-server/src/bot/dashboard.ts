@@ -10,6 +10,7 @@ import {
 import { eq, and, count } from "drizzle-orm";
 import { getChainBalance, getNativeTokenPrice, CHAIN_SYMBOLS } from "../services/chainPrice";
 import { logger } from "../lib/logger";
+import { isAdmin } from "../lib/isAdmin";
 
 export async function getOrCreateUser(telegramId: number, ctx: Context) {
   let user = await db.query.usersTable.findFirst({
@@ -93,6 +94,10 @@ export async function renderDashboard(
       `Use the menu below to scan, snipe, and track trades.`,
     ].join("\n");
 
+    const adminRow = isAdmin(telegramId)
+      ? [[Markup.button.callback("📊 Bot Stats", "bot_stats"), Markup.button.callback("❓ Help & Guide", "help_guide")]]
+      : [[Markup.button.callback("❓ Help & Guide", "help_guide")]];
+
     const keyboard = Markup.inlineKeyboard([
       [
         Markup.button.callback("🔍 New Runners", "new_runners"),
@@ -118,10 +123,7 @@ export async function renderDashboard(
         Markup.button.callback("⚙️ Settings", "settings"),
         Markup.button.callback("⚗️ Filters", "filters"),
       ],
-      [
-        Markup.button.callback("📊 Bot Stats", "bot_stats"),
-        Markup.button.callback("❓ Help & Guide", "help_guide"),
-      ],
+      ...adminRow,
     ]);
 
     if (edit && ctx.callbackQuery) {

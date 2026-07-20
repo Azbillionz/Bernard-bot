@@ -58,6 +58,25 @@ import { db } from "@workspace/db";
 import { usersTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 
+// All commands shown in the Telegram menu
+const BOT_COMMANDS = [
+  { command: "start",     description: "🏠 Open main dashboard" },
+  { command: "menu",      description: "🏠 Open main dashboard" },
+  { command: "wallet",    description: "💼 Wallet manager" },
+  { command: "trending",  description: "🔥 Trending tokens" },
+  { command: "runners",   description: "🔍 New runners / boosted tokens" },
+  { command: "pumpfun",   description: "🌱 PumpFun & Moonshot sniper" },
+  { command: "signals",   description: "📋 Previous signals" },
+  { command: "trades",    description: "📉 My trades" },
+  { command: "pnl",       description: "📊 PnL center" },
+  { command: "snipe",     description: "🤖 Toggle auto-snipe" },
+  { command: "copytrade", description: "🔄 Copy-trade manager" },
+  { command: "scanner",   description: "📡 Group scanner" },
+  { command: "settings",  description: "⚙️ Settings & chain selection" },
+  { command: "filters",   description: "⚗️ Snipe filters" },
+  { command: "help",      description: "❓ Help & guide" },
+];
+
 export function createBot(redis: IORedis | null): Telegraf<Context> {
   const token = process.env["TELEGRAM_BOT_TOKEN"];
   if (!token) {
@@ -78,33 +97,54 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
     ctx.reply("⚠️ An internal error occurred. Please try again.").catch(() => {});
   });
 
+  // ── Global middleware: instantly dismiss the loading spinner on every
+  //    inline-button tap so users never see the clock animation. ───────────
+  bot.use(async (ctx, next) => {
+    if (ctx.callbackQuery) {
+      // Fire-and-forget — we don't wait; handler runs in parallel
+      ctx.answerCbQuery().catch(() => {});
+    }
+    return next();
+  });
+
   // ── Commands ────────────────────────────────────────────────────────────
   bot.start(async (ctx) => {
     await renderDashboard(ctx, false);
   });
 
-  bot.command("menu", async (ctx) => {
-    await renderDashboard(ctx, false);
-  });
+  bot.command("menu",      async (ctx) => renderDashboard(ctx, false));
+  bot.command("wallet",    async (ctx) => handleWalletManager(ctx));
+  bot.command("trending",  async (ctx) => handleTrending(ctx));
+  bot.command("runners",   async (ctx) => handleNewRunners(ctx));
+  bot.command("pumpfun",   async (ctx) => handlePumpfun(ctx));
+  bot.command("signals",   async (ctx) => handlePreviousSignals(ctx));
+  bot.command("trades",    async (ctx) => handleMyTrades(ctx));
+  bot.command("pnl",       async (ctx) => handlePnlCenter(ctx));
+  bot.command("snipe",     async (ctx) => handleAutoSnipe(ctx));
+  bot.command("copytrade", async (ctx) => handleCopyTrade(ctx));
+  bot.command("scanner",   async (ctx) => handleGroupScanner(ctx));
+  bot.command("settings",  async (ctx) => handleSettings(ctx));
+  bot.command("filters",   async (ctx) => handleFilters(ctx));
+  bot.command("help",      async (ctx) => handleHelpGuide(ctx));
 
   // ── Callback Queries ────────────────────────────────────────────────────
-  bot.action("dashboard", (ctx) => renderDashboard(ctx, true));
-  bot.action("new_runners", handleNewRunners);
-  bot.action("trending", handleTrending);
-  bot.action("pumpfun", handlePumpfun);
-  bot.action("prev_signals", handlePreviousSignals);
+  bot.action("dashboard",      (ctx) => renderDashboard(ctx, true));
+  bot.action("new_runners",    handleNewRunners);
+  bot.action("trending",       handleTrending);
+  bot.action("pumpfun",        handlePumpfun);
+  bot.action("prev_signals",   handlePreviousSignals);
   bot.action("wallet_manager", handleWalletManager);
-  bot.action("copy_trade", handleCopyTrade);
-  bot.action("add_copy_target", handleAddCopyTarget);
-  bot.action("group_scanner", handleGroupScanner);
-  bot.action("pnl_center", handlePnlCenter);
-  bot.action("my_trades", handleMyTrades);
-  bot.action("auto_snipe", handleAutoSnipe);
-  bot.action("settings", handleSettings);
-  bot.action("filters", handleFilters);
-  bot.action("toggle_honeypot", handleToggleHoneypot);
-  bot.action("bot_stats", handleBotStats);
-  bot.action("help_guide", handleHelpGuide);
+  bot.action("copy_trade",     handleCopyTrade);
+  bot.action("add_copy_target",handleAddCopyTarget);
+  bot.action("group_scanner",  handleGroupScanner);
+  bot.action("pnl_center",     handlePnlCenter);
+  bot.action("my_trades",      handleMyTrades);
+  bot.action("auto_snipe",     handleAutoSnipe);
+  bot.action("settings",       handleSettings);
+  bot.action("filters",        handleFilters);
+  bot.action("toggle_honeypot",handleToggleHoneypot);
+  bot.action("bot_stats",      handleBotStats);
+  bot.action("help_guide",     handleHelpGuide);
 
   // Dynamic actions with parameters
   bot.action(/^analyze:(.+)$/, async (ctx) => {
@@ -223,5 +263,13 @@ export async function launchBot(bot: Telegraf<Context>): Promise<void> {
     // Delete any existing webhook before polling
     await bot.telegram.deleteWebhook();
     void bot.launch({ dropPendingUpdates: true });
+  }
+
+  // Register the command list so Telegram shows the "/" menu to users
+  try {
+    await bot.telegram.setMyCommands(BOT_COMMANDS);
+    logger.info("Bot commands registered with Telegram");
+  } catch (err) {
+    logger.warn({ err }, "Failed to register bot commands — non-fatal");
   }
 }

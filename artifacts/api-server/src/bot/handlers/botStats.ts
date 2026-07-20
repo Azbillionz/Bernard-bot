@@ -3,9 +3,14 @@ import { Markup } from "telegraf";
 import { db } from "@workspace/db";
 import { usersTable, tradesTable, signalsTable } from "@workspace/db";
 import { count, eq } from "drizzle-orm";
+import { isAdmin } from "../../lib/isAdmin";
 
 export async function handleBotStats(ctx: Context): Promise<void> {
-  await ctx.answerCbQuery("📊 Loading stats...");
+  const telegramId = ctx.from?.id;
+  if (!telegramId || !isAdmin(telegramId)) {
+    await ctx.reply("⛔ Bot Stats are restricted to admins only.");
+    return;
+  }
 
   const [userRow] = await db.select({ c: count() }).from(usersTable);
   const [tradeRow] = await db.select({ c: count() }).from(tradesTable);
