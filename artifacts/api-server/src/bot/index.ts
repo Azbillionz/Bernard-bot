@@ -53,6 +53,7 @@ import {
   getPendingCustomBuy,
 } from "./handlers/trade";
 import { initMessageQueue } from "../workers/messageQueue";
+import { setBotRef } from "../lib/botRef";
 import { db } from "@workspace/db";
 import { usersTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
@@ -64,6 +65,9 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
   }
 
   const bot = new Telegraf<Context>(token);
+
+  // Register bot singleton so any module can send messages
+  setBotRef(bot);
 
   // Initialize BullMQ message queue
   initMessageQueue(bot, redis);
