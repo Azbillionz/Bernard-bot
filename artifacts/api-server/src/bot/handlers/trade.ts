@@ -170,6 +170,17 @@ async function executeBuy(
     } else {
       // EVM via 1inch + Flashbots
       const amountWei = BigInt(Math.round(amount * 1e18)).toString();
+
+      // 1inch API key is optional — redirect to DEX if unavailable
+      if (!process.env["ONEINCH_API_KEY"]) {
+        const dexUrl = `https://app.uniswap.org/#/swap?outputCurrency=${ca}`;
+        await ctx.reply(
+          `⚠️ <b>In-bot EVM swaps require a 1inch API key.</b>\n\nTrade this token directly on a DEX:\n<a href="${dexUrl}">🔗 Uniswap — ${ca.slice(0,8)}…</a>`,
+          { parse_mode: "HTML", link_preview_options: { is_disabled: true } }
+        );
+        return;
+      }
+
       const swap = await get1inchSwap(
         user.activeChain, EVM_NATIVE, ca, amountWei, wallet.address
       );

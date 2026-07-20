@@ -22,17 +22,38 @@ if (Number.isNaN(port) || port <= 0) throw new Error(`Invalid PORT: "${rawPort}"
 
 // ── Redis (optional) ──────────────────────────────────────────────────────
 let redis: import("ioredis").default | null = null;
-const redisUrl = process.env["REDIS_URL"];
+
+function extractRedisUrl(raw: string): string | null {
+  // If the value is just a URL already, return it
+  if (/^rediss?:\/\//i.test(raw.trim())) return raw.trim();
+  // If user pasted a redis-cli command like "redis-cli --tls -u redis://...", extract the URL
+  const match = raw.match(/rediss?:\/\/\S+/i);
+  return match ? match[0] : null;
+}
+
+const rawRedisUrl = process.env["REDIS_URL"];
+const redisUrl = rawRedisUrl ? extractRedisUrl(rawRedisUrl) : null;
+
 if (redisUrl) {
-  const { default: IORedis } = await import("ioredis");
-  redis = new IORedis(redisUrl, { maxRetriesPerRequest: null, lazyConnect: true });
-  redis.on("error", (err) => logger.error({ err }, "Redis error"));
-  await redis.connect().catch((err) => {
-    logger.warn({ err }, "Redis connect failed — queue disabled");
+  try {
+    const { default: IORedis } = await import("ioredis");
+    redis = new IORedis(redisUrl, { maxRetriesPerRequest: null, lazyConnect: true });
+    redis.on("error", (err) => logger.warn({ err }, "Redis error"));
+    await redis.connect().catch((err) => {
+      logger.warn({ err }, "Redis connect failed — queue disabled");
+      redis = null;
+    });
+    if (redis) logger.info("Redis connected — BullMQ message queue active");
+  } catch (err) {
+    logger.warn({ err }, "Redis init failed — queue disabled");
     redis = null;
-  });
+  }
 } else {
-  logger.warn("REDIS_URL not set — BullMQ message queue disabled");
+  if (rawRedisUrl) {
+    logger.warn("REDIS_URL value does not contain a valid redis:// URL — queue disabled");
+  } else {
+    logger.warn("REDIS_URL not set — BullMQ message queue disabled");
+  }
 }
 
 // ── Bot initialization ────────────────────────────────────────────────────

@@ -27,9 +27,12 @@ export async function get1inchSwap(
   fromAddress: string,
   slippage = 1
 ): Promise<EvmSwapTx | null> {
+  // 1inch API key is optional; without it the swap route is unavailable
+  const apiKey = process.env["ONEINCH_API_KEY"] ?? "";
+  if (!apiKey) return null;
+
   const chainId = CHAIN_IDS[chain] ?? 1;
   const feeWallet = process.env["DEV_FEE_WALLET"] ?? "";
-  const apiKey = process.env["ONEINCH_API_KEY"] ?? "";
 
   const params = new URLSearchParams({
     src: fromToken,
