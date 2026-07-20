@@ -1,0 +1,5 @@
+- [Bot stack decisions](bot-stack.md) — ORM=Drizzle, polling vs webhook, Redis optional, externalized esbuild deps
+- [Token lookup waterfall](token-lookup.md) — DexScreener → GeckoTerminal → PumpFun; SOL regex 32-44 chars
+- [Auto-snipe architecture](auto-snipe.md) — executeSolBuy shared core; triggerAutoSnipeBuy uses getBotRef; filters from sniperConfigs
+- [Railway deployment](railway-deploy.md) — Dockerfile at root, multi-stage, pnpm monorepo; rediss:// for Upstash TLS
+- [Schema field names](schema-fields.md) — autoBuyAmountNative (not Sol), minLiquidityUsd is text, getNativeTokenPrice returns string|number

@@ -1,0 +1,30 @@
+# Version control
+.git
+.gitignore
+
+# Dev tooling
+.local/
+.agents/
+attached_assets/
+*.md
+!replit.md
+
+# Node artifacts (will be reinstalled in Docker)
+node_modules/
+**/node_modules/
+
+# Build outputs (rebuilt in Docker)
+**/dist/
+lib/**/dist/
+lib/**/*.tsbuildinfo
+
+# Replit-specific
+.replit
+replit.nix
+
+# Logs
+*.log
+
+# Test
+**/*.test.ts
+**/*.spec.ts

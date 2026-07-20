@@ -29,6 +29,11 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Health check — required by Railway, load balancers, and uptime monitors
+app.get("/health", (_req, res) => {
+  res.json({ status: "ok", uptime: Math.floor(process.uptime()), ts: Date.now() });
+});
+
 app.use("/api", router);
 
 export default app;
