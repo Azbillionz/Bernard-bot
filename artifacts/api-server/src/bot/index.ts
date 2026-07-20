@@ -4,7 +4,7 @@
  * Uses webhook in production, polling in development.
  */
 
-import { Telegraf, type Context } from "telegraf";
+import { Telegraf, Markup, type Context } from "telegraf";
 import type IORedis from "ioredis";
 import { logger } from "../lib/logger";
 import { renderDashboard } from "./dashboard";
@@ -14,6 +14,7 @@ import { handlePumpfun } from "./handlers/pumpfun";
 import { handlePreviousSignals } from "./handlers/previousSignals";
 import {
   handleWalletManager,
+  handleDeposit,
   handleGenerateWallet,
   handleImportWallet,
   processImportedKey,
@@ -74,6 +75,7 @@ const BOT_COMMANDS = [
   { command: "scanner",   description: "📡 Group scanner" },
   { command: "settings",  description: "⚙️ Settings & chain selection" },
   { command: "filters",   description: "⚗️ Snipe filters" },
+  { command: "deposit",   description: "💳 Deposit funds to active wallet" },
   { command: "help",      description: "❓ Help & guide" },
 ];
 
@@ -145,6 +147,50 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
   bot.action("toggle_honeypot",handleToggleHoneypot);
   bot.action("bot_stats",      handleBotStats);
   bot.action("help_guide",     handleHelpGuide);
+
+  // Deposit screen — shows full address + balance + trading shortcuts
+  bot.action(/^deposit:(.+)$/, async (ctx) => {
+    const chain = (ctx.match as RegExpMatchArray)[1] ?? "SOL";
+    await handleDeposit(ctx, chain);
+  });
+
+  // Deposit command shortcut
+  bot.command("deposit", async (ctx) => {
+    const user = await db.query.usersTable.findFirst({
+      where: eq(usersTable.telegramId, ctx.from.id),
+    });
+    await handleDeposit(ctx, user?.activeChain ?? "SOL");
+  });
+
+  // Prompt user to paste a CA to buy — guides them from deposit → trade
+  bot.action("prompt_buy", async (ctx) => {
+    await ctx.reply(
+      [
+        `💰 <b>Buy a Token</b>`,
+        ``,
+        `Paste a token contract address below and I'll analyze it`,
+        `and show you buy options instantly.`,
+        ``,
+        `<b>Solana:</b> base58 address (e.g. <code>EPjFWdd5...</code>)`,
+        `<b>EVM:</b> 0x address (e.g. <code>0x6B175...</code>)`,
+        ``,
+        `Or pick a token from the lists below:`,
+      ].join("\n"),
+      {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback("🔍 New Runners", "new_runners"),
+            Markup.button.callback("🔥 Trending", "trending"),
+          ],
+          [
+            Markup.button.callback("🌱 PumpFun Snipe", "pumpfun"),
+            Markup.button.callback("⬅️ Dashboard", "dashboard"),
+          ],
+        ]),
+      }
+    );
+  });
 
   // Dynamic actions with parameters
   bot.action(/^analyze:(.+)$/, async (ctx) => {

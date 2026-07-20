@@ -213,13 +213,31 @@ async function executeBuy(ctx: Context, ca: string, amount: number): Promise<voi
       .where(eq(tradesTable.id, trade!.id));
 
     await ctx.reply(
-      [`✅ <b>Buy Confirmed!</b>`, `🪙 ${tokenSymbol} [${user.activeChain}]`,
-       `💰 Amount: ${amount} native`, `🔗 TX: <code>${txHash}</code>`,
-       `💸 Fee: 1% platform fee applied`].join("\n"),
+      [
+        `✅ <b>Buy Confirmed!</b>`,
+        `🪙 <b>${tokenName}</b> [${tokenSymbol}] — ${user.activeChain}`,
+        `💰 Spent: <b>${amount} ${user.activeChain}</b>`,
+        `💲 Price at entry: <b>${parseFloat(priceUsd).toFixed(8)}</b>`,
+        `🔗 TX: <code>${txHash}</code>`,
+        `💸 1% platform fee applied`,
+        `—`,
+        `Use the buttons below to sell your position.`,
+      ].join("\n"),
       {
         parse_mode: "HTML",
         ...Markup.inlineKeyboard([
-          [Markup.button.callback("📊 PnL Center", "pnl_center")],
+          [
+            Markup.button.callback("📤 Sell 25%", `sell:${ca}:25`),
+            Markup.button.callback("📤 Sell 50%", `sell:${ca}:50`),
+          ],
+          [
+            Markup.button.callback("📤 Sell 75%", `sell:${ca}:75`),
+            Markup.button.callback("📤 Sell 100%", `sell:${ca}:100`),
+          ],
+          [
+            Markup.button.callback("📊 PnL Center", "pnl_center"),
+            Markup.button.callback("🔍 Analyze Token", `analyze:${ca}`),
+          ],
           [Markup.button.callback("⬅️ Dashboard", "dashboard")],
         ]),
       }
