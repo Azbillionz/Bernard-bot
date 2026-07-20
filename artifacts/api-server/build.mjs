@@ -29,6 +29,15 @@ async function buildAll() {
     // - use path traversal to read files (e.g. @google-cloud/secret-manager loads sibling .proto files)
     external: [
       "*.node",
+      // Bot & queue — externalized for native module compatibility
+      "@solana/web3.js",
+      "ioredis",
+      "bullmq",
+      "ws",
+      "telegraf",
+      "ethers",
+      "bs58",
+      "tweetnacl",
       "sharp",
       "better-sqlite3",
       "sqlite3",
