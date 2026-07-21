@@ -23,6 +23,12 @@ import { safeReply } from "../../lib/ctxHelper";
 // Active PumpFun WSS listeners keyed by db userId
 const activeListeners = new Map<number, WsManager>();
 
+// Token names/symbols come from an external WebSocket feed — escape before
+// rendering in HTML parse mode, or a name like "<Best>" silently kills the send.
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 const PUMPFUN_WSS =
   process.env["SOLANA_WSS_URL"] ?? "wss://pumpportal.fun/api/data";
 
@@ -114,8 +120,13 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
         if (data.txType !== "create" || !data.mint) return;
 
         const mint = data.mint;
+        // Raw values for DB + trade params; escaped values for HTML rendering
         const symbol = data.symbol ?? "?";
         const name = data.name ?? "Unknown";
+        const symbolSafe = escapeHtml(symbol);
+        const nameSafe = escapeHtml(name);
+        const devBuySol = data.solAmount ?? 0;
+        const mcapSol = data.marketCapSol ?? 0;
 
         // ── Resolve token data (waterfall) ────────────────────────────────
         let priceUsd = "0";
@@ -130,7 +141,7 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
           liquidityUsd = pair.liquidity?.usd ?? 0;
           tokenMsg = [
             `🌱 <b>New Token!</b>`,
-            `🪙 <b>${name}</b> (<code>${symbol}</code>)`,
+            `🪙 <b>${nameSafe}</b> (<code>${symbolSafe}</code>)`,
             `📍 CA: <code>${mint}</code>`,
             `💲 Price: $${Number(priceUsd).toFixed(8)}`,
             `💧 Liquidity: $${(liquidityUsd / 1_000).toFixed(1)}K`,
@@ -143,7 +154,7 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
             liquidityUsd = gecko.liquidityUsd;
             tokenMsg = [
               `🌱 <b>New Token!</b>`,
-              `🪙 <b>${gecko.baseTokenName}</b>`,
+              `🪙 <b>${escapeHtml(gecko.baseTokenName)}</b>`,
               `📍 CA: <code>${mint}</code>`,
               `💲 Price: $${Number(priceUsd).toFixed(8)}`,
               `💧 Liquidity: $${(liquidityUsd / 1_000).toFixed(1)}K`,
@@ -157,7 +168,7 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
             liquidityUsd = 0;
             tokenMsg = [
               `🌱 <b>New PumpFun Launch!</b>`,
-              `🪙 <b>${pumpToken?.name ?? name}</b> (<code>${pumpToken?.symbol ?? symbol}</code>)`,
+              `🪙 <b>${escapeHtml(pumpToken?.name ?? name)}</b> (<code>${escapeHtml(pumpToken?.symbol ?? symbol)}</code>)`,
               `📍 CA: <code>${mint}</code>`,
               `💲 ~$${pPrice.toFixed(8)}`,
               pumpToken ? `📈 Bonding: ${pumpToken.bondingCurveProgress.toFixed(1)}%` : "",
@@ -165,6 +176,13 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
             ].filter(Boolean).join("\n");
           }
         }
+
+        // Launch stats straight from the mint event itself
+        const launchStats = [
+          mcapSol > 0 ? `🏦 Launch MC: ${mcapSol.toFixed(1)} SOL` : "",
+          devBuySol > 0 ? `👨‍💻 Dev buy: ${devBuySol.toFixed(2)} SOL` : "",
+        ].filter(Boolean).join(" | ");
+        if (launchStats) tokenMsg += `\n${launchStats}`;
 
         // ── Alert user with analyze + quick buy buttons ─────────────────
         await queueMessage(chatId, tokenMsg, "HTML", [
@@ -201,7 +219,7 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
         if (minLiq > 0 && liquidityUsd < minLiq) {
           await queueMessage(
             telegramId,
-            `⏭ <b>Auto-Snipe Skipped</b> — ${symbol}\n💧 Liquidity $${(liquidityUsd / 1_000).toFixed(1)}K < minimum $${(minLiq / 1_000).toFixed(1)}K`,
+            `⏭ <b>Auto-Snipe Skipped</b> — ${symbolSafe}\n💧 Liquidity $${(liquidityUsd / 1_000).toFixed(1)}K < minimum $${(minLiq / 1_000).toFixed(1)}K`,
             "HTML"
           );
           return;
@@ -210,11 +228,11 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
         if (freshConfig?.honeypotCheck !== false) {
           const sec = await checkSolanaToken(mint).catch(() => null);
           if (sec?.isBlacklisted) {
-            await queueMessage(telegramId, `⛔ <b>Auto-Snipe Blocked</b> — ${symbol}\nToken is blacklisted.`, "HTML");
+            await queueMessage(telegramId, `⛔ <b>Auto-Snipe Blocked</b> — ${symbolSafe}\n📍 <code>${mint}</code>\nToken is blacklisted.`, "HTML");
             return;
           }
           if (sec?.hasMintAuthority) {
-            await queueMessage(telegramId, `⛔ <b>Auto-Snipe Blocked</b> — ${symbol}\nMint authority is still active — high rug risk.`, "HTML");
+            await queueMessage(telegramId, `⛔ <b>Auto-Snipe Blocked</b> — ${symbolSafe}\n📍 <code>${mint}</code>\nMint authority is still active — high rug risk.`, "HTML");
             return;
           }
         }
@@ -234,7 +252,7 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
             telegramId,
             [
               `⚠️ <b>Auto-Snipe Skipped — Insufficient Balance</b>`,
-              `🪙 Token: <b>${symbol}</b>`,
+              `🪙 Token: <b>${symbolSafe}</b>`,
               `💼 Your balance: <b>${currentBal.toFixed(4)} SOL</b>`,
               `🛒 Required: <b>${buyAmt} SOL</b>`,
               ``,

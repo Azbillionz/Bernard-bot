@@ -275,17 +275,33 @@ export interface AutoSnipeParams {
   liquidityUsd: number;
 }
 
+// Token names/symbols come from external feeds — escape before HTML render
+function escapeSnipeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 /**
  * Triggered by the PumpFun listener when a new token is detected
  * and the user has autoSnipe=true. Runs the full SOL buy flow without ctx.
+ * Notifies the user about the coin at every stage: trigger → confirmed/failed.
  */
 export async function triggerAutoSnipeBuy(params: AutoSnipeParams): Promise<void> {
   const { dbUserId, telegramId, ca, tokenSymbol, tokenName, priceUsd, liquidityUsd } = params;
   const bot = getBotRef();
   if (!bot) return;
 
-  const send = (msg: string) =>
-    bot.telegram.sendMessage(telegramId, msg, { parse_mode: "HTML" }).catch(() => undefined);
+  const symbolSafe = escapeSnipeHtml(tokenSymbol);
+  const nameSafe = escapeSnipeHtml(tokenName);
+  const entryPrice = Number(priceUsd) > 0 ? `${Number(priceUsd).toFixed(8)}` : "— (fresh mint)";
+  const liqLabel = liquidityUsd > 0 ? `${(liquidityUsd / 1_000).toFixed(1)}K` : "— (fresh mint)";
+
+  const send = (msg: string, keyboard?: { text: string; callback_data: string }[][]) =>
+    bot.telegram
+      .sendMessage(telegramId, msg, {
+        parse_mode: "HTML",
+        ...(keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {}),
+      })
+      .catch(() => undefined);
 
   try {
     const wallet = await db.query.walletsTable.findFirst({
@@ -296,7 +312,7 @@ export async function triggerAutoSnipeBuy(params: AutoSnipeParams): Promise<void
       ),
     });
     if (!wallet) {
-      await send(`⚡ <b>Auto-Snipe skipped</b> — no active SOL wallet.\n🪙 Token: <b>${tokenSymbol}</b> <code>${ca}</code>`);
+      await send(`⚡ <b>Auto-Snipe skipped</b> — no active SOL wallet.\n🪙 Token: <b>${symbolSafe}</b> <code>${ca}</code>`);
       return;
     }
 
@@ -308,16 +324,26 @@ export async function triggerAutoSnipeBuy(params: AutoSnipeParams): Promise<void
     const slippageBps = config?.slippageBps ?? 1500; // wider for fast snipe
     const jitoTip = config?.jitoTipLamports ?? getJitoTipLamports();
 
-    // ── Filter: min liquidity ─────────────────────────────────────────────
+    // ── Filter: min liquidity (race guard — listener already notified) ────
     const minLiq = parseFloat(config?.minLiquidityUsd ?? "0");
     if (minLiq > 0 && liquidityUsd < minLiq) {
       logger.info({ ca, liquidityUsd, minLiq }, "Auto-snipe skipped: liquidity below filter");
       return;
     }
 
+    // ── Notify: snipe triggered, full coin card ───────────────────────────
     await send(
-      [`⚡ <b>Auto-Sniping!</b>`, `🪙 <b>${tokenSymbol}</b> — <code>${ca}</code>`,
-       `💰 Buying <b>${buyAmount} SOL</b> via Jito bundle…`].join("\n")
+      [
+        `⚡ <b>Auto-Snipe Triggered!</b>`,
+        `━━━━━━━━━━━━━━━━━`,
+        `🪙 <b>${nameSafe}</b> (${symbolSafe})`,
+        `📍 CA: <code>${ca}</code>`,
+        `💲 Price: ${entryPrice}`,
+        `💧 Liquidity: ${liqLabel}`,
+        `━━━━━━━━━━━━━━━━━`,
+        `💰 Buying: <b>${buyAmount} SOL</b> | 📉 Slippage: ${(slippageBps / 100).toFixed(1)}%`,
+        `🚀 Sending via Jito bundle…`,
+      ].join("\n")
     );
 
     const [trade] = await db.insert(tradesTable).values({
@@ -347,16 +373,48 @@ export async function triggerAutoSnipeBuy(params: AutoSnipeParams): Promise<void
       .set({ status: "CONFIRMED", txHash: result.txHash })
       .where(eq(tradesTable.id, trade!.id));
 
+    // ── Notify: position opened, with manage buttons ──────────────────────
     await send(
-      [`✅ <b>Auto-Snipe Confirmed!</b>`, `🪙 <b>${tokenSymbol}</b>`,
-       `💰 Bought: ${buyAmount} SOL`, `🔗 TX: <code>${result.txHash}</code>`,
-       `💸 1% platform fee applied`].join("\n")
+      [
+        `✅ <b>Auto-Snipe Confirmed!</b>`,
+        `━━━━━━━━━━━━━━━━━`,
+        `🪙 <b>${nameSafe}</b> (${symbolSafe})`,
+        `📍 CA: <code>${ca}</code>`,
+        `💰 Spent: <b>${buyAmount} SOL</b>`,
+        `💲 Entry: ${entryPrice}`,
+        `🔗 TX: <code>${result.txHash}</code>`,
+        `💸 1% platform fee applied`,
+        ``,
+        `Manage your new position below 👇`,
+      ].join("\n"),
+      [
+        [
+          { text: "📊 Live Price", callback_data: `price:${ca}` },
+          { text: "🔍 Analyze", callback_data: `analyze:${ca}` },
+        ],
+        [
+          { text: "📤 Sell 25%", callback_data: `sell:${ca}:25` },
+          { text: "📤 Sell 50%", callback_data: `sell:${ca}:50` },
+        ],
+        [
+          { text: "📤 Sell 75%", callback_data: `sell:${ca}:75` },
+          { text: "📤 Sell 100%", callback_data: `sell:${ca}:100` },
+        ],
+      ]
     );
 
     logger.info({ ca, txHash: result.txHash, telegramId }, "Auto-snipe executed");
   } catch (err) {
     logger.error({ err, ca, telegramId }, "Auto-snipe buy failed");
-    await send(`❌ <b>Auto-Snipe Failed</b>\n🪙 ${tokenSymbol}\n${String(err).slice(0, 200)}`);
+    await send(
+      [
+        `❌ <b>Auto-Snipe Failed</b>`,
+        `🪙 <b>${nameSafe}</b> (${symbolSafe})`,
+        `📍 CA: <code>${ca}</code>`,
+        `⚠️ ${escapeSnipeHtml(String(err).slice(0, 200))}`,
+      ].join("\n"),
+      [[{ text: "🔍 Analyze Token", callback_data: `analyze:${ca}` }]]
+    );
   }
 }
 
