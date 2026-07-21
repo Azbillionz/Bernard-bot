@@ -7,17 +7,18 @@
 import type { Context } from "telegraf";
 import { Markup } from "telegraf";
 import { db } from "@workspace/db";
-import { usersTable, sniperConfigsTable, signalsTable } from "@workspace/db";
+import { usersTable, walletsTable, sniperConfigsTable, signalsTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { WsManager } from "../../services/wsManager";
 import { getPairsByToken } from "../../services/dexscreener";
 import { searchGeckoToken } from "../../services/geckoTerminal";
 import { getPumpFunToken } from "../../services/pumpfunApi";
-import { getNativeTokenPrice } from "../../services/chainPrice";
+import { getNativeTokenPrice, getChainBalance } from "../../services/chainPrice";
 import { checkSolanaToken } from "../../services/goplus";
 import { queueMessage } from "../../workers/messageQueue";
 import { triggerAutoSnipeBuy } from "./trade";
 import { logger } from "../../lib/logger";
+import { safeReply } from "../../lib/ctxHelper";
 
 // Active PumpFun WSS listeners keyed by db userId
 const activeListeners = new Map<number, WsManager>();
@@ -30,21 +31,26 @@ export function isPumpfunListenerActive(dbUserId: number): boolean {
 }
 
 export async function handlePumpfun(ctx: Context): Promise<void> {
-  await ctx.answerCbQuery();
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
 
   const user = await db.query.usersTable.findFirst({
     where: eq(usersTable.telegramId, telegramId),
   });
-  if (!user) return;
+  if (!user) { await ctx.reply("❌ User not found. Send /start first."); return; }
 
-  // Toggle
+  // Toggle off
   if (activeListeners.has(user.id)) {
     activeListeners.get(user.id)?.destroy();
     activeListeners.delete(user.id);
-    await ctx.editMessageText(
-      "🌱 <b>PumpFun / Moonshot Snipe</b>\n\n🔴 Listener <b>stopped</b>.",
+    await safeReply(
+      ctx,
+      [
+        `🌱 <b>PumpFun / Moonshot Snipe</b>`,
+        ``,
+        `🔴 Listener <b>stopped</b>.`,
+        `Tap Start to resume monitoring new launches.`,
+      ].join("\n"),
       {
         parse_mode: "HTML",
         ...Markup.inlineKeyboard([
@@ -56,9 +62,41 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
     return;
   }
 
+  // Check SOL wallet + balance before starting
+  const wallet = await db.query.walletsTable.findFirst({
+    where: and(
+      eq(walletsTable.userId, user.id),
+      eq(walletsTable.chain, "SOL"),
+      eq(walletsTable.isActive, true)
+    ),
+  });
+
+  const config = await db.query.sniperConfigsTable.findFirst({
+    where: eq(sniperConfigsTable.userId, user.id),
+  });
+
+  // Clamp + cap at 6 decimals so `buy:MINT:AMT` callback data stays under
+  // Telegram's 64-byte limit even with 44-char Solana mints.
+  const rawAutoBuy = parseFloat(config?.autoBuyAmountNative ?? "0.1");
+  const autoBuyAmount = Number(
+    Math.min(Math.max(Number.isFinite(rawAutoBuy) ? rawAutoBuy : 0.1, 0.000001), 1000).toFixed(6)
+  );
+  const autoSnipe = user.autoSnipe ?? false;
+
+  let balanceWarning = "";
+  if (autoSnipe) {
+    if (!wallet) {
+      balanceWarning = `\n⚠️ <b>No SOL wallet!</b> Auto-snipe is ON but you have no wallet. Go to 💼 Wallet Manager first.`;
+    } else {
+      const bal = parseFloat(await getChainBalance("SOL", wallet.address).catch(() => "0"));
+      if (bal < autoBuyAmount) {
+        balanceWarning = `\n⚠️ <b>Low balance!</b> Your wallet has <b>${bal.toFixed(4)} SOL</b> but auto-buy is set to <b>${autoBuyAmount} SOL</b>.\nDeposit more SOL or reduce the buy amount in ⚗️ Filters.`;
+      }
+    }
+  }
+
   const chatId = ctx.chat?.id ?? telegramId;
   const dbUserId = user.id;
-  const autoSnipe = user.autoSnipe ?? false;
 
   const ws = new WsManager(
     PUMPFUN_WSS,
@@ -79,37 +117,39 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
         const symbol = data.symbol ?? "?";
         const name = data.name ?? "Unknown";
 
-        // ── Resolve token data (waterfall) ──────────────────────────────
+        // ── Resolve token data (waterfall) ────────────────────────────────
         let priceUsd = "0";
         let liquidityUsd = 0;
         let tokenMsg = "";
 
-        const pairs = await getPairsByToken(mint);
+        const pairs = await getPairsByToken(mint).catch(() => []);
         const pair = pairs[0];
 
         if (pair) {
           priceUsd = pair.priceUsd ?? "0";
           liquidityUsd = pair.liquidity?.usd ?? 0;
           tokenMsg = [
-            `🌱 <b>New Token!</b> (DexScreener)`,
+            `🌱 <b>New Token!</b>`,
             `🪙 <b>${name}</b> (<code>${symbol}</code>)`,
             `📍 CA: <code>${mint}</code>`,
-            `💲 $${Number(priceUsd).toFixed(8)} | 💧 Liq: $${(liquidityUsd / 1_000).toFixed(1)}K`,
+            `💲 Price: $${Number(priceUsd).toFixed(8)}`,
+            `💧 Liquidity: $${(liquidityUsd / 1_000).toFixed(1)}K`,
+            `📊 Source: DexScreener`,
           ].join("\n");
         } else {
-          // Try GeckoTerminal
           const gecko = await searchGeckoToken(mint, "SOL").catch(() => null);
           if (gecko) {
             priceUsd = gecko.priceUsd;
             liquidityUsd = gecko.liquidityUsd;
             tokenMsg = [
-              `🌱 <b>New Token!</b> (GeckoTerminal)`,
+              `🌱 <b>New Token!</b>`,
               `🪙 <b>${gecko.baseTokenName}</b>`,
               `📍 CA: <code>${mint}</code>`,
-              `💲 $${Number(priceUsd).toFixed(8)} | 💧 Liq: $${(liquidityUsd / 1_000).toFixed(1)}K`,
+              `💲 Price: $${Number(priceUsd).toFixed(8)}`,
+              `💧 Liquidity: $${(liquidityUsd / 1_000).toFixed(1)}K`,
+              `📊 Source: GeckoTerminal`,
             ].join("\n");
           } else {
-            // PumpFun REST API
             const pumpToken = await getPumpFunToken(mint).catch(() => null);
             const solUsd = Number(await getNativeTokenPrice("SOL").catch(() => 0));
             const pPrice = pumpToken ? pumpToken.priceNative * solUsd : 0;
@@ -120,17 +160,21 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
               `🪙 <b>${pumpToken?.name ?? name}</b> (<code>${pumpToken?.symbol ?? symbol}</code>)`,
               `📍 CA: <code>${mint}</code>`,
               `💲 ~$${pPrice.toFixed(8)}`,
-              pumpToken
-                ? `📈 Bonding: ${(pumpToken.bondingCurveProgress).toFixed(1)}%`
-                : "",
+              pumpToken ? `📈 Bonding: ${pumpToken.bondingCurveProgress.toFixed(1)}%` : "",
+              `📊 Source: PumpFun`,
             ].filter(Boolean).join("\n");
           }
         }
 
-        // ── Alert user ──────────────────────────────────────────────────
-        await queueMessage(chatId, tokenMsg, "HTML");
+        // ── Alert user with analyze + quick buy buttons ─────────────────
+        await queueMessage(chatId, tokenMsg, "HTML", [
+          [
+            { text: "📊 Analyze", callback_data: `analyze:${mint}` },
+            { text: "💰 Quick Buy", callback_data: `buy:${mint}:${autoBuyAmount}` },
+          ],
+        ]);
 
-        // ── Record signal ───────────────────────────────────────────────
+        // ── Record signal ────────────────────────────────────────────────
         void db.insert(signalsTable).values({
           userId: dbUserId,
           tokenAddress: mint,
@@ -140,34 +184,67 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
           priceUsd,
         }).catch(() => undefined);
 
-        // ── Auto-snipe logic ────────────────────────────────────────────
+        // ── Auto-snipe ───────────────────────────────────────────────────
         if (!autoSnipe) return;
 
-        const config = await db.query.sniperConfigsTable.findFirst({
+        // Re-fetch user state to catch toggle changes
+        const freshUser = await db.query.usersTable.findFirst({
+          where: eq(usersTable.id, dbUserId),
+        });
+        if (!freshUser?.autoSnipe) return;
+
+        const freshConfig = await db.query.sniperConfigsTable.findFirst({
           where: eq(sniperConfigsTable.userId, dbUserId),
         });
 
-        // Filter: min liquidity
-        const minLiq = parseFloat(config?.minLiquidityUsd ?? "0");
+        const minLiq = parseFloat(freshConfig?.minLiquidityUsd ?? "0");
         if (minLiq > 0 && liquidityUsd < minLiq) {
-          logger.info({ mint, liquidityUsd, minLiq }, "Auto-snipe: liquidity filter rejected");
+          await queueMessage(
+            telegramId,
+            `⏭ <b>Auto-Snipe Skipped</b> — ${symbol}\n💧 Liquidity $${(liquidityUsd / 1_000).toFixed(1)}K < minimum $${(minLiq / 1_000).toFixed(1)}K`,
+            "HTML"
+          );
           return;
         }
 
-        // Filter: honeypot + tax check
-        if (config?.honeypotCheck !== false) {
+        if (freshConfig?.honeypotCheck !== false) {
           const sec = await checkSolanaToken(mint).catch(() => null);
           if (sec?.isBlacklisted) {
-            logger.info({ mint }, "Auto-snipe: token blacklisted, skipping");
+            await queueMessage(telegramId, `⛔ <b>Auto-Snipe Blocked</b> — ${symbol}\nToken is blacklisted.`, "HTML");
             return;
           }
           if (sec?.hasMintAuthority) {
-            logger.info({ mint }, "Auto-snipe: mint authority active, skipping");
+            await queueMessage(telegramId, `⛔ <b>Auto-Snipe Blocked</b> — ${symbol}\nMint authority is still active — high rug risk.`, "HTML");
             return;
           }
         }
 
-        // Fire auto-snipe (non-blocking, errors logged internally)
+        // Check balance again right before firing
+        const freshWallet = await db.query.walletsTable.findFirst({
+          where: and(eq(walletsTable.userId, dbUserId), eq(walletsTable.chain, "SOL"), eq(walletsTable.isActive, true)),
+        });
+        if (!freshWallet) {
+          await queueMessage(telegramId, `⚠️ <b>Auto-Snipe Skipped</b> — No SOL wallet found. Go to 💼 Wallet Manager to set one up.`, "HTML");
+          return;
+        }
+        const currentBal = parseFloat(await getChainBalance("SOL", freshWallet.address).catch(() => "0"));
+        const buyAmt = parseFloat(freshConfig?.autoBuyAmountNative ?? "0.1");
+        if (currentBal < buyAmt) {
+          await queueMessage(
+            telegramId,
+            [
+              `⚠️ <b>Auto-Snipe Skipped — Insufficient Balance</b>`,
+              `🪙 Token: <b>${symbol}</b>`,
+              `💼 Your balance: <b>${currentBal.toFixed(4)} SOL</b>`,
+              `🛒 Required: <b>${buyAmt} SOL</b>`,
+              ``,
+              `Deposit SOL to your wallet to enable auto-sniping.`,
+            ].join("\n"),
+            "HTML"
+          );
+          return;
+        }
+
         void triggerAutoSnipeBuy({
           dbUserId,
           telegramId,
@@ -190,22 +267,27 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
   activeListeners.set(user.id, ws);
 
   const autoSnipeStatus = autoSnipe
-    ? "⚡ <b>Auto-Snipe: ON</b> — will auto-buy new launches matching your filters."
-    : "🔴 Auto-Snipe: OFF — toggle it in ⚙️ Settings.";
+    ? `⚡ <b>Auto-Snipe: ON</b> — will auto-buy matching launches${balanceWarning}`
+    : `🔴 Auto-Snipe: OFF — tap 🤖 Auto-Snipe to enable automatic buying`;
 
-  await ctx.editMessageText(
+  await safeReply(
+    ctx,
     [
-      "🌱 <b>PumpFun / Moonshot Snipe</b>",
-      "",
-      "🟢 Listener <b>active</b> — monitoring new token creations on Solana.",
-      "You'll receive alerts for each new PumpFun launch.",
-      "",
+      `🌱 <b>PumpFun / Moonshot Snipe</b>`,
+      ``,
+      `🟢 Listener <b>active</b> — watching new Solana token launches.`,
+      `You'll receive an alert with buy buttons for every new mint.`,
+      ``,
       autoSnipeStatus,
     ].join("\n"),
     {
       parse_mode: "HTML",
       ...Markup.inlineKeyboard([
         [Markup.button.callback("⏹ Stop Listener", "pumpfun")],
+        [
+          Markup.button.callback("🤖 Auto-Snipe Settings", "auto_snipe"),
+          Markup.button.callback("⚗️ Filters", "filters"),
+        ],
         [Markup.button.callback("⬅️ Dashboard", "dashboard")],
       ]),
     }

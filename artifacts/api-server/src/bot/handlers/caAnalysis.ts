@@ -177,8 +177,11 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<void> 
   );
 }
 
-/** Also handles the inline "analyze:CA" callback button */
+/**
+ * Also handles the inline "analyze:CA" callback button.
+ * NOTE: the global middleware in bot/index.ts already answers every
+ * callback query — answering again here throws and aborts the analysis.
+ */
 export async function handleAnalyzeCallback(ctx: Context, ca: string): Promise<void> {
-  await ctx.answerCbQuery("🔍 Analyzing…");
   await handleCAAnalysis(ctx, ca);
 }

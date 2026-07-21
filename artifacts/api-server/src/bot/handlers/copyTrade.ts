@@ -3,12 +3,20 @@ import { Markup } from "telegraf";
 import { db } from "@workspace/db";
 import { usersTable, copyTradesTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
+import { safeReply } from "../../lib/ctxHelper";
+import { registerPendingClearer } from "../../lib/pendingFlows";
 
 // Pending add-target state
 const pendingAdd = new Map<number, true>();
+registerPendingClearer((id) => pendingAdd.delete(id));
 
 export function isPendingCopyTradeAdd(telegramId: number): boolean {
   return pendingAdd.has(telegramId);
+}
+
+// Escape user-provided strings before rendering in HTML parse mode
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 export async function processCopyTradeInput(
@@ -26,7 +34,7 @@ export async function processCopyTradeInput(
 
   const parts = input.trim().split(/\s+/);
   const walletAddress = parts[0] ?? "";
-  const label = parts.slice(1).join(" ") || "Unnamed";
+  const label = (parts.slice(1).join(" ") || "Unnamed").slice(0, 32);
 
   if (!walletAddress) {
     await ctx.reply("❌ No wallet address provided.");
@@ -42,7 +50,7 @@ export async function processCopyTradeInput(
   });
 
   await ctx.reply(
-    `✅ <b>Copy-Trade Target Added</b>\n\n💼 Wallet: <code>${walletAddress}</code>\n🏷️ Label: ${label}\n🔗 Chain: ${user.activeChain}`,
+    `✅ <b>Copy-Trade Target Added</b>\n\n💼 Wallet: <code>${escapeHtml(walletAddress)}</code>\n🏷️ Label: ${escapeHtml(label)}\n🔗 Chain: ${user.activeChain}`,
     {
       parse_mode: "HTML",
       ...Markup.inlineKeyboard([
@@ -53,7 +61,6 @@ export async function processCopyTradeInput(
 }
 
 export async function handleCopyTrade(ctx: Context): Promise<void> {
-  await ctx.answerCbQuery();
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
 
@@ -72,7 +79,7 @@ export async function handleCopyTrade(ctx: Context): Promise<void> {
       ? ["No copy-trade targets set."]
       : targets.map(
           (t) =>
-            `${t.isActive ? "🟢" : "⚪"} [${t.chain}] <code>${t.targetWallet.slice(0, 8)}...${t.targetWallet.slice(-4)}</code> — ${t.label}`
+            `${t.isActive ? "🟢" : "⚪"} [${t.chain}] <code>${escapeHtml(t.targetWallet.slice(0, 8))}...${escapeHtml(t.targetWallet.slice(-4))}</code> — ${escapeHtml(t.label)}`
         );
 
   const removeButtons =
@@ -84,7 +91,8 @@ export async function handleCopyTrade(ctx: Context): Promise<void> {
         ]
       : [];
 
-  await ctx.editMessageText(
+  await safeReply(
+    ctx,
     `🔄 <b>Copy-Trade</b>\n—\n${lines.join("\n")}\n—\nTap ➕ to track a new wallet.`,
     {
       parse_mode: "HTML",
@@ -98,7 +106,6 @@ export async function handleCopyTrade(ctx: Context): Promise<void> {
 }
 
 export async function handleAddCopyTarget(ctx: Context): Promise<void> {
-  await ctx.answerCbQuery();
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
 
@@ -113,7 +120,18 @@ export async function handleRemoveCopyTarget(
   ctx: Context,
   targetId: number
 ): Promise<void> {
-  await ctx.answerCbQuery();
-  await db.delete(copyTradesTable).where(eq(copyTradesTable.id, targetId));
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  // Ownership check — only delete targets belonging to the requesting user
+  const user = await db.query.usersTable.findFirst({
+    where: eq(usersTable.telegramId, telegramId),
+  });
+  if (!user) return;
+
+  await db
+    .delete(copyTradesTable)
+    .where(and(eq(copyTradesTable.id, targetId), eq(copyTradesTable.userId, user.id)));
+
   await handleCopyTrade(ctx);
 }

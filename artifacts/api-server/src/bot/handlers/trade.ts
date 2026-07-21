@@ -3,7 +3,11 @@
  * SOL: Jupiter V6 → simulate → Jito bundle (1% platform fee via platformFeeBps)
  * EVM: 1inch swap → eth_call simulate → direct/Flashbots
  *
- * Also exports triggerAutoSnipeBuy — used by the PumpFun listener for auto-sniping.
+ * Also exports triggerAutoSnipeBuy — used by the PumpFun listener for auto-sniping —
+ * and handleLivePrice — the live price tracker with entry P&L.
+ *
+ * NOTE: no handler here calls ctx.answerCbQuery — the global middleware in
+ * bot/index.ts answers every callback instantly; answering twice throws.
  */
 
 import type { Context } from "telegraf";
@@ -15,7 +19,7 @@ import {
   tradesTable,
   sniperConfigsTable,
 } from "@workspace/db";
-import { eq, and } from "drizzle-orm";
+import { eq, and, desc } from "drizzle-orm";
 import { decrypt } from "../../lib/encryption";
 import { getBotRef } from "../../lib/botRef";
 import { getJupiterQuote, buildJupiterSwapTx, simulateSolanaTx } from "../../services/jupiter";
@@ -24,6 +28,7 @@ import { get1inchSwap } from "../../services/evmSwap";
 import { simulateEvmTx } from "../../services/flashbots";
 import { getPairsByToken } from "../../services/dexscreener";
 import { logger } from "../../lib/logger";
+import { registerPendingClearer } from "../../lib/pendingFlows";
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const EVM_NATIVE = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
@@ -31,6 +36,7 @@ const PLATFORM_FEE_BPS = 100; // 1%
 
 // ── Pending custom buy state ──────────────────────────────────────────────
 const pendingCustomBuy = new Map<number, { ca: string }>();
+registerPendingClearer((id) => pendingCustomBuy.delete(id));
 
 export function getPendingCustomBuy(telegramId: number): { ca: string } | null {
   return pendingCustomBuy.get(telegramId) ?? null;
@@ -42,18 +48,24 @@ export async function processCustomBuyAmount(ctx: Context, amount: string): Prom
   const state = pendingCustomBuy.get(telegramId);
   if (!state) return;
   pendingCustomBuy.delete(telegramId);
-  await executeBuy(ctx, state.ca, parseFloat(amount));
+
+  const parsed = parseFloat(amount);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    await ctx.reply("❌ Invalid amount — send a positive number like <b>0.25</b>.", {
+      parse_mode: "HTML",
+    });
+    return;
+  }
+  await executeBuy(ctx, state.ca, parsed);
 }
 
 export async function handleBuy(ctx: Context, ca: string, amountStr: string): Promise<void> {
-  await ctx.answerCbQuery("💰 Executing buy…");
   const amount = parseFloat(amountStr);
   if (isNaN(amount) || amount <= 0) { await ctx.reply("❌ Invalid amount."); return; }
   await executeBuy(ctx, ca, amount);
 }
 
 export async function handleBuyCustom(ctx: Context, ca: string): Promise<void> {
-  await ctx.answerCbQuery();
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
   pendingCustomBuy.set(telegramId, { ca });
@@ -61,7 +73,6 @@ export async function handleBuyCustom(ctx: Context, ca: string): Promise<void> {
 }
 
 export async function handleSell(ctx: Context, ca: string, percentStr: string): Promise<void> {
-  await ctx.answerCbQuery("📤 Executing sell…");
   const percent = parseInt(percentStr, 10);
   if (isNaN(percent) || percent <= 0 || percent > 100) { await ctx.reply("❌ Invalid percent."); return; }
   await executeSell(ctx, ca, percent);
@@ -235,7 +246,7 @@ async function executeBuy(ctx: Context, ca: string, amount: number): Promise<voi
             Markup.button.callback("📤 Sell 100%", `sell:${ca}:100`),
           ],
           [
-            Markup.button.callback("📊 PnL Center", "pnl_center"),
+            Markup.button.callback("📊 Live Price", `price:${ca}`),
             Markup.button.callback("🔍 Analyze Token", `analyze:${ca}`),
           ],
           [Markup.button.callback("⬅️ Dashboard", "dashboard")],
@@ -468,4 +479,121 @@ async function executeSell(ctx: Context, ca: string, percent: number): Promise<v
       { parse_mode: "HTML", ...Markup.inlineKeyboard([[Markup.button.callback("⬅️ Dashboard", "dashboard")]]) }
     );
   }
+}
+
+// ── Live Price Tracker ────────────────────────────────────────────────────
+
+function fmtPrice(p: number): string {
+  if (!isFinite(p) || p <= 0) return "0";
+  return p >= 1 ? p.toFixed(4) : p.toFixed(8);
+}
+
+/**
+ * Edit-in-place when triggered from a button (so Refresh updates the same
+ * message); falls back to a new reply from command context. A failed edit
+ * with "message is not modified" is silently ignored (price unchanged).
+ */
+async function editOrReply(
+  ctx: Context,
+  text: string,
+  extra: Parameters<Context["reply"]>[1]
+): Promise<void> {
+  if (ctx.callbackQuery) {
+    try {
+      await ctx.editMessageText(text, extra as Parameters<Context["editMessageText"]>[1]);
+      return;
+    } catch (err) {
+      if (String(err).includes("message is not modified")) return;
+      // fall through to reply
+    }
+  }
+  await ctx.reply(text, extra);
+}
+
+export async function handleLivePrice(ctx: Context, ca: string): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  const user = await db.query.usersTable.findFirst({
+    where: eq(usersTable.telegramId, telegramId),
+  });
+  if (!user) { await ctx.reply("❌ User not found. Type /start first."); return; }
+
+  const pairs = await getPairsByToken(ca);
+  const pair = pairs[0];
+
+  if (!pair) {
+    await editOrReply(ctx, `❌ No live market data found for:\n<code>${ca}</code>`, {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([
+        [
+          Markup.button.callback("🔄 Retry", `price:${ca}`),
+          Markup.button.callback("🔍 Analyze", `analyze:${ca}`),
+        ],
+        [Markup.button.callback("⬅️ My Trades", "my_trades")],
+      ]),
+    });
+    return;
+  }
+
+  const current = parseFloat(pair.priceUsd ?? "0");
+  const tokenSymbol = pair.baseToken.symbol ?? "?";
+  const tokenName = pair.baseToken.name ?? "Unknown";
+
+  // Most recent confirmed BUY of this token → entry price for P&L
+  const lastBuy = await db.query.tradesTable.findFirst({
+    where: and(
+      eq(tradesTable.userId, user.id),
+      eq(tradesTable.tokenAddress, ca),
+      eq(tradesTable.side, "BUY"),
+      eq(tradesTable.status, "CONFIRMED")
+    ),
+    orderBy: [desc(tradesTable.createdAt)],
+  });
+
+  const lines = [
+    `📊 <b>Live Price — ${tokenSymbol}</b>`,
+    `—`,
+    `🪙 <b>${tokenName}</b> [${tokenSymbol}]`,
+    `📬 <code>${ca}</code>`,
+    `—`,
+    `💲 <b>Current Price:</b> $${fmtPrice(current)}`,
+  ];
+
+  if (lastBuy) {
+    const entry = parseFloat(lastBuy.priceUsd);
+    lines.push(`🎯 <b>Your Entry:</b> $${fmtPrice(entry)}`);
+    if (entry > 0 && current > 0) {
+      const pct = ((current - entry) / entry) * 100;
+      lines.push(
+        `${pct >= 0 ? "🟢" : "🔴"} <b>P&L:</b> ${pct >= 0 ? "+" : ""}${pct.toFixed(1)}% from entry`
+      );
+    }
+    lines.push(`💰 <b>Position:</b> ${lastBuy.amountIn} ${lastBuy.chain} spent`);
+  } else {
+    lines.push(`ℹ️ No confirmed buys of this token yet.`);
+  }
+
+  lines.push(`—`, `🕐 Updated: ${new Date().toISOString().slice(11, 19)} UTC`);
+
+  const sellRows = lastBuy
+    ? [[
+        Markup.button.callback("📤 25%", `sell:${ca}:25`),
+        Markup.button.callback("📤 50%", `sell:${ca}:50`),
+        Markup.button.callback("📤 75%", `sell:${ca}:75`),
+        Markup.button.callback("📤 100%", `sell:${ca}:100`),
+      ]]
+    : [];
+
+  await editOrReply(ctx, lines.join("\n"), {
+    parse_mode: "HTML",
+    ...Markup.inlineKeyboard([
+      [
+        Markup.button.callback("🔄 Refresh", `price:${ca}`),
+        Markup.button.callback("🔍 Analyze", `analyze:${ca}`),
+      ],
+      ...sellRows,
+      [Markup.button.callback("⬅️ My Trades", "my_trades")],
+    ]),
+  });
 }

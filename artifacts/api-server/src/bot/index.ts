@@ -19,6 +19,14 @@ import {
   handleImportWallet,
   processImportedKey,
   getPendingImport,
+  handleWalletDetail,
+  handleRenameWallet,
+  processRenameInput,
+  getPendingRename,
+  handleActivateWallet,
+  handleExportKey,
+  handleDeleteWallet,
+  handleDeleteWalletConfirm,
 } from "./handlers/walletManager";
 import {
   handleCopyTrade,
@@ -50,11 +58,13 @@ import {
   handleBuy,
   handleBuyCustom,
   handleSell,
+  handleLivePrice,
   processCustomBuyAmount,
   getPendingCustomBuy,
 } from "./handlers/trade";
 import { initMessageQueue } from "../workers/messageQueue";
 import { setBotRef } from "../lib/botRef";
+import { clearAllPendingFlows } from "../lib/pendingFlows";
 import { db } from "@workspace/db";
 import { usersTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
@@ -100,11 +110,28 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
   });
 
   // ── Global middleware: instantly dismiss the loading spinner on every
-  //    inline-button tap so users never see the clock animation. ───────────
+  //    inline-button tap so users never see the clock animation.
+  //    IMPORTANT: individual handlers must NOT call ctx.answerCbQuery again —
+  //    answering the same query twice throws and triggers bot.catch. ───────
   bot.use(async (ctx, next) => {
+    const fromId = ctx.from?.id;
     if (ctx.callbackQuery) {
       // Fire-and-forget — we don't wait; handler runs in parallel
       ctx.answerCbQuery().catch(() => {});
+      // Any button tap = navigation away from a pending text prompt.
+      // Cancel stale multi-step flows (import / rename / filter / custom-buy /
+      // copy-trade) so the next text message is never consumed by an
+      // abandoned step. Handlers that START a flow set their state after
+      // this middleware runs, so fresh flows are unaffected.
+      if (fromId) clearAllPendingFlows(fromId);
+    } else if (
+      fromId &&
+      ctx.message &&
+      "text" in ctx.message &&
+      ctx.message.text.startsWith("/")
+    ) {
+      // Slash commands are explicit navigation — cancel stale flows too
+      clearAllPendingFlows(fromId);
     }
     return next();
   });
@@ -147,6 +174,11 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
   bot.action("toggle_honeypot",handleToggleHoneypot);
   bot.action("bot_stats",      handleBotStats);
   bot.action("help_guide",     handleHelpGuide);
+
+  // Delete the message containing this button (used on key-export screens)
+  bot.action("del_msg", async (ctx) => {
+    await ctx.deleteMessage().catch(() => {});
+  });
 
   // Deposit screen — shows full address + balance + trading shortcuts
   bot.action(/^deposit:(.+)$/, async (ctx) => {
@@ -208,6 +240,37 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
     await handleImportWallet(ctx, chain);
   });
 
+  // ── Wallet management (detail / rename / activate / export / delete) ────
+  bot.action(/^wallet:(\d+)$/, async (ctx) => {
+    const id = parseInt((ctx.match as RegExpMatchArray)[1] ?? "0", 10);
+    await handleWalletDetail(ctx, id);
+  });
+
+  bot.action(/^wallet_rename:(\d+)$/, async (ctx) => {
+    const id = parseInt((ctx.match as RegExpMatchArray)[1] ?? "0", 10);
+    await handleRenameWallet(ctx, id);
+  });
+
+  bot.action(/^wallet_activate:(\d+)$/, async (ctx) => {
+    const id = parseInt((ctx.match as RegExpMatchArray)[1] ?? "0", 10);
+    await handleActivateWallet(ctx, id);
+  });
+
+  bot.action(/^wallet_export:(\d+)$/, async (ctx) => {
+    const id = parseInt((ctx.match as RegExpMatchArray)[1] ?? "0", 10);
+    await handleExportKey(ctx, id);
+  });
+
+  bot.action(/^wallet_del:(\d+)$/, async (ctx) => {
+    const id = parseInt((ctx.match as RegExpMatchArray)[1] ?? "0", 10);
+    await handleDeleteWallet(ctx, id);
+  });
+
+  bot.action(/^wallet_del_yes:(\d+)$/, async (ctx) => {
+    const id = parseInt((ctx.match as RegExpMatchArray)[1] ?? "0", 10);
+    await handleDeleteWalletConfirm(ctx, id);
+  });
+
   bot.action(/^rm_ct:(\d+)$/, async (ctx) => {
     const id = parseInt((ctx.match as RegExpMatchArray)[1] ?? "0", 10);
     await handleRemoveCopyTarget(ctx, id);
@@ -238,6 +301,12 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
     await handleSell(ctx, ca ?? "", pct ?? "100");
   });
 
+  // Live price tracker — refreshable, shows entry P&L + sell shortcuts
+  bot.action(/^price:(.+)$/, async (ctx) => {
+    const ca = (ctx.match as RegExpMatchArray)[1] ?? "";
+    await handleLivePrice(ctx, ca);
+  });
+
   // ── Text handler — CA detection + multi-step flows ──────────────────────
   bot.on("text", async (ctx) => {
     const text = ctx.message.text.trim();
@@ -247,6 +316,12 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
     const importState = getPendingImport(telegramId);
     if (importState) {
       await processImportedKey(ctx, text);
+      return;
+    }
+
+    // Multi-step flow: wallet rename
+    if (getPendingRename(telegramId)) {
+      await processRenameInput(ctx, text);
       return;
     }
 
@@ -283,7 +358,8 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
         where: eq(usersTable.telegramId, telegramId),
       });
       if (user?.scannerActive) {
-        await scanGroupMessage(text, user.id, ctx.chat.id, user.activeChain);
+        // Pass telegramId so scanner can DM the user in private, not reply in group
+        await scanGroupMessage(text, user.id, telegramId, user.activeChain);
       }
       return;
     }

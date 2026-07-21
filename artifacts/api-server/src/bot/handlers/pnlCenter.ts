@@ -4,6 +4,7 @@ import { db } from "@workspace/db";
 import { usersTable, tradesTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { getPairsByToken } from "../../services/dexscreener";
+import { safeReply } from "../../lib/ctxHelper";
 
 interface PnlSummary {
   tokenSymbol: string;
@@ -14,34 +15,39 @@ interface PnlSummary {
   realizedPnl: number;
   unrealizedPnl: number;
   currentPriceUsd: number;
+  entryPriceUsd: number;
 }
 
 export async function handlePnlCenter(ctx: Context): Promise<void> {
-  await ctx.answerCbQuery("📊 Calculating PnL...");
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
 
   const user = await db.query.usersTable.findFirst({
     where: eq(usersTable.telegramId, telegramId),
   });
-  if (!user) return;
+  if (!user) { await ctx.reply("❌ User not found. Send /start first."); return; }
 
   const trades = await db
     .select()
     .from(tradesTable)
-    .where(
-      and(eq(tradesTable.userId, user.id), eq(tradesTable.status, "CONFIRMED"))
-    );
+    .where(and(eq(tradesTable.userId, user.id), eq(tradesTable.status, "CONFIRMED")));
+
+  const nav = Markup.inlineKeyboard([
+    [Markup.button.callback("🔄 Refresh", "pnl_center")],
+    [Markup.button.callback("📉 My Trades", "my_trades"), Markup.button.callback("⬅️ Dashboard", "dashboard")],
+  ]);
 
   if (trades.length === 0) {
-    await ctx.editMessageText(
-      "📊 <b>PnL Center</b>\n\nNo confirmed trades yet. Execute your first trade to see PnL tracking.",
-      {
-        parse_mode: "HTML",
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback("⬅️ Dashboard", "dashboard")],
-        ]),
-      }
+    await safeReply(
+      ctx,
+      [
+        `📊 <b>PnL Center</b>`,
+        `—`,
+        `No confirmed trades yet.`,
+        ``,
+        `Paste a token CA and tap Buy to execute your first trade.`,
+      ].join("\n"),
+      { parse_mode: "HTML", ...nav }
     );
     return;
   }
@@ -59,62 +65,73 @@ export async function handlePnlCenter(ctx: Context): Promise<void> {
       realizedPnl: 0,
       unrealizedPnl: 0,
       currentPriceUsd: 0,
+      entryPriceUsd: parseFloat(t.priceUsd),
     };
 
-    const amountIn = parseFloat(t.amountIn);
-    const amountOut = parseFloat(t.amountOut);
-    const price = parseFloat(t.priceUsd);
-
     if (t.side === "BUY") {
-      existing.totalBought += amountIn;
+      existing.totalBought += parseFloat(t.amountIn);
     } else {
-      existing.totalSold += amountOut;
-      existing.realizedPnl += amountOut - amountIn;
+      const out = parseFloat(t.amountOut ?? "0");
+      const inAmt = parseFloat(t.amountIn);
+      existing.totalSold += out;
+      existing.realizedPnl += out - inAmt;
     }
 
     tokenMap.set(key, existing);
   }
 
-  // Fetch current prices for unrealized PnL
-  for (const [, summary] of tokenMap) {
-    const pairs = await getPairsByToken(summary.tokenAddress);
-    const currentPrice = parseFloat(pairs[0]?.priceUsd ?? "0");
-    summary.currentPriceUsd = currentPrice;
-    if (summary.totalBought > summary.totalSold) {
-      const remaining = summary.totalBought - summary.totalSold;
-      // unrealized = remaining tokens * current price - cost basis
-      summary.unrealizedPnl = remaining * currentPrice - summary.totalBought;
-    }
-  }
+  // Fetch current prices in parallel
+  await Promise.all(
+    [...tokenMap.entries()].map(async ([, summary]) => {
+      const pairs = await getPairsByToken(summary.tokenAddress).catch(() => []);
+      const currentPrice = parseFloat(pairs[0]?.priceUsd ?? "0");
+      summary.currentPriceUsd = currentPrice;
+      if (summary.totalBought > summary.totalSold) {
+        const remaining = summary.totalBought - summary.totalSold;
+        summary.unrealizedPnl = remaining * currentPrice - summary.totalBought;
+      }
+    })
+  );
 
   const lines = [...tokenMap.values()].map((s) => {
-    const realized = s.realizedPnl >= 0 ? `+$${s.realizedPnl.toFixed(2)}` : `-$${Math.abs(s.realizedPnl).toFixed(2)}`;
-    const unrealized = s.unrealizedPnl >= 0 ? `+$${s.unrealizedPnl.toFixed(2)}` : `-$${Math.abs(s.unrealizedPnl).toFixed(2)}`;
+    const realized =
+      s.realizedPnl >= 0
+        ? `+${s.realizedPnl.toFixed(4)}`
+        : `${s.realizedPnl.toFixed(4)}`;
+    const unrealized =
+      s.unrealizedPnl >= 0
+        ? `+${s.unrealizedPnl.toFixed(4)}`
+        : `${s.unrealizedPnl.toFixed(4)}`;
+
+    const priceDelta =
+      s.entryPriceUsd > 0
+        ? (((s.currentPriceUsd - s.entryPriceUsd) / s.entryPriceUsd) * 100).toFixed(2)
+        : "0.00";
+    const priceArrow = parseFloat(priceDelta) >= 0 ? "📈" : "📉";
+
     return [
       `🪙 <b>${s.tokenSymbol}</b> [${s.chain}]`,
-      `  💰 Realized: <b>${realized}</b>`,
-      `  📈 Unrealized: <b>${unrealized}</b>`,
+      `  ${priceArrow} Price: $${s.currentPriceUsd.toFixed(8)} (${priceDelta}% from entry)`,
+      `  💰 Realized P&L: <b>${realized} native</b>`,
+      `  📊 Unrealized P&L: <b>${unrealized} native</b>`,
+      `  🛒 Total Bought: ${s.totalBought.toFixed(4)} | Sold: ${s.totalSold.toFixed(4)}`,
     ].join("\n");
   });
 
   const totalRealized = [...tokenMap.values()].reduce((a, b) => a + b.realizedPnl, 0);
   const totalUnrealized = [...tokenMap.values()].reduce((a, b) => a + b.unrealizedPnl, 0);
+  const totalSign = totalRealized + totalUnrealized >= 0 ? "📈" : "📉";
 
-  await ctx.editMessageText(
+  await safeReply(
+    ctx,
     [
       `📊 <b>PnL Center</b>`,
       `—`,
       lines.join("\n\n"),
       `—`,
-      `📈 Total Realized: <b>${totalRealized >= 0 ? "+" : ""}$${totalRealized.toFixed(2)}</b>`,
-      `💡 Total Unrealized: <b>${totalUnrealized >= 0 ? "+" : ""}$${totalUnrealized.toFixed(2)}</b>`,
+      `${totalSign} Total Realized: <b>${totalRealized >= 0 ? "+" : ""}${totalRealized.toFixed(4)} native</b>`,
+      `💡 Total Unrealized: <b>${totalUnrealized >= 0 ? "+" : ""}${totalUnrealized.toFixed(4)} native</b>`,
     ].join("\n"),
-    {
-      parse_mode: "HTML",
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback("🔄 Refresh", "pnl_center")],
-        [Markup.button.callback("⬅️ Dashboard", "dashboard")],
-      ]),
-    }
+    { parse_mode: "HTML", ...nav }
   );
 }

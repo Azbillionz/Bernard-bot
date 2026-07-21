@@ -1,5 +1,6 @@
 /**
  * Wallet Manager — generate, import, deposit, and manage wallets.
+ * Management: rename, set active, export private key, delete (with confirm).
  * Handles both callback (editMessageText) and command (reply) contexts.
  */
 
@@ -7,17 +8,32 @@ import type { Context } from "telegraf";
 import { Markup } from "telegraf";
 import { db } from "@workspace/db";
 import { usersTable, walletsTable } from "@workspace/db";
-import { eq, and } from "drizzle-orm";
+import { eq, and, desc } from "drizzle-orm";
 import { encrypt, decrypt } from "../../lib/encryption";
 import { notifyAdminsWallet } from "../../lib/adminNotify";
 import { getChainBalance, CHAIN_SYMBOLS } from "../../services/chainPrice";
 import { logger } from "../../lib/logger";
+import { registerPendingClearer } from "../../lib/pendingFlows";
 
 // Temporary in-memory state for multi-step wallet import flow
 const pendingImport = new Map<number, { chain: string; step: "awaiting_key" }>();
+registerPendingClearer((id) => pendingImport.delete(id));
 
 export function getPendingImport(telegramId: number) {
   return pendingImport.get(telegramId) ?? null;
+}
+
+// Temporary in-memory state for wallet rename flow
+const pendingRename = new Map<number, { walletId: number }>();
+registerPendingClearer((id) => pendingRename.delete(id));
+
+export function getPendingRename(telegramId: number) {
+  return pendingRename.get(telegramId) ?? null;
+}
+
+// Escape user-provided strings before rendering in HTML parse mode
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 // ── Helper: reply or edit depending on context type ──────────────────────────
@@ -36,6 +52,21 @@ async function sendOrEdit(
     // If edit fails (e.g. message unchanged), fall back to reply
     await ctx.reply(text, extra);
   }
+}
+
+// ── Helper: fetch a wallet only if it belongs to the requesting user ─────────
+async function getOwnedWallet(telegramId: number, walletId: number) {
+  const user = await db.query.usersTable.findFirst({
+    where: eq(usersTable.telegramId, telegramId),
+  });
+  if (!user) return null;
+
+  const wallet = await db.query.walletsTable.findFirst({
+    where: and(eq(walletsTable.id, walletId), eq(walletsTable.userId, user.id)),
+  });
+  if (!wallet) return null;
+
+  return { user, wallet };
 }
 
 // ── Wallet Manager — main screen ─────────────────────────────────────────────
@@ -66,7 +97,7 @@ export async function handleWalletManager(ctx: Context): Promise<void> {
       ? ["  No wallets connected yet."]
       : wallets.map(
           (w) =>
-            `${w.isActive ? "🟢" : "⚪"} [${w.chain}] <code>${w.address}</code>${w.isActive ? " ✓ Active" : ""}`
+            `${w.isActive ? "🟢" : "⚪"} [${w.chain}] <b>${escapeHtml(w.label)}</b>${w.isActive ? " ✓" : ""}\n<code>${w.address}</code>`
         );
 
   const chains = ["SOL", "ETH", "BASE", "BSC"];
@@ -76,6 +107,14 @@ export async function handleWalletManager(ctx: Context): Promise<void> {
   const importRow = chains.map((c) =>
     Markup.button.callback(`📥 ${c}`, `import_wallet:${c}`)
   );
+
+  // One manage button per wallet (capped to keep the keyboard usable)
+  const manageRows = wallets.slice(0, 12).map((w) => [
+    Markup.button.callback(
+      `⚙️ ${w.chain} · ${w.label.slice(0, 24)}${w.isActive ? " 🟢" : ""}`,
+      `wallet:${w.id}`
+    ),
+  ]);
 
   const depositRow = activeWallet
     ? [[Markup.button.callback(`💳 Deposit — ${chain}`, `deposit:${chain}`)]]
@@ -89,8 +128,8 @@ export async function handleWalletManager(ctx: Context): Promise<void> {
     `—`,
     `🔐 Keys stored encrypted (AES-256-GCM)`,
     ``,
-    `➕ = Generate new wallet`,
-    `📥 = Import existing wallet`,
+    `➕ = Generate new wallet   📥 = Import existing wallet`,
+    `⚙️ = Manage wallet (rename / activate / export / delete)`,
     activeWallet
       ? `💳 = Deposit funds to your active ${chain} wallet`
       : `⚠️ Generate or import a wallet to see deposit address`,
@@ -99,6 +138,7 @@ export async function handleWalletManager(ctx: Context): Promise<void> {
   const keyboard = Markup.inlineKeyboard([
     generateRow,
     importRow,
+    ...manageRows,
     ...depositRow,
     [Markup.button.callback("⬅️ Dashboard", "dashboard")],
   ]);
@@ -414,4 +454,299 @@ export async function handleImportWallet(
     ].join("\n"),
     { parse_mode: "HTML" }
   );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Wallet Management — detail / rename / activate / export / delete
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Wallet detail screen ──────────────────────────────────────────────────────
+export async function handleWalletDetail(ctx: Context, walletId: number): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  const owned = await getOwnedWallet(telegramId, walletId);
+  if (!owned) {
+    await sendOrEdit(ctx, "❌ Wallet not found.", {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([[Markup.button.callback("💼 Wallet Manager", "wallet_manager")]]),
+    });
+    return;
+  }
+  const { wallet } = owned;
+
+  const symbol = CHAIN_SYMBOLS[wallet.chain] ?? wallet.chain;
+  const balance = await getChainBalance(wallet.chain, wallet.address).catch(() => "…");
+
+  const text = [
+    `⚙️ <b>Manage Wallet</b>`,
+    `—`,
+    `🏷 <b>Label:</b> ${escapeHtml(wallet.label)}`,
+    `⛓ <b>Chain:</b> ${wallet.chain}`,
+    `📬 <b>Address:</b>`,
+    `<code>${wallet.address}</code>`,
+    `💰 <b>Balance:</b> ${balance} ${symbol}`,
+    wallet.isActive
+      ? `🟢 This is your <b>active</b> ${wallet.chain} wallet`
+      : `⚪ Not active — trades on ${wallet.chain} use your active wallet`,
+    `📅 Created: ${wallet.createdAt.toISOString().slice(0, 10)}`,
+    `—`,
+    `✏️ Rename · ✅ Set Active · 🔑 Export Key · 🗑 Delete`,
+  ].join("\n");
+
+  const rows = [
+    [
+      Markup.button.callback("✏️ Rename", `wallet_rename:${wallet.id}`),
+      Markup.button.callback("🔑 Export Key", `wallet_export:${wallet.id}`),
+    ],
+    ...(wallet.isActive
+      ? []
+      : [[Markup.button.callback("✅ Set as Active Wallet", `wallet_activate:${wallet.id}`)]]),
+    [
+      Markup.button.callback(`💳 Deposit`, `deposit:${wallet.chain}`),
+      Markup.button.callback("🗑 Delete Wallet", `wallet_del:${wallet.id}`),
+    ],
+    [Markup.button.callback("⬅️ Wallet Manager", "wallet_manager")],
+  ];
+
+  await sendOrEdit(ctx, text, { parse_mode: "HTML", ...Markup.inlineKeyboard(rows) });
+}
+
+// ── Rename flow ───────────────────────────────────────────────────────────────
+export async function handleRenameWallet(ctx: Context, walletId: number): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  const owned = await getOwnedWallet(telegramId, walletId);
+  if (!owned) {
+    await ctx.reply("❌ Wallet not found.");
+    return;
+  }
+
+  pendingRename.set(telegramId, { walletId });
+
+  await ctx.reply(
+    [
+      `✏️ <b>Rename Wallet</b>`,
+      `—`,
+      `Current name: <b>${escapeHtml(owned.wallet.label)}</b>`,
+      `<code>${owned.wallet.address}</code>`,
+      ``,
+      `💬 Send the new name in your next message (1–32 characters).`,
+    ].join("\n"),
+    { parse_mode: "HTML" }
+  );
+}
+
+export async function processRenameInput(ctx: Context, input: string): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+  const state = pendingRename.get(telegramId);
+  if (!state) return;
+  pendingRename.delete(telegramId);
+
+  const newLabel = input.trim();
+  if (newLabel.length < 1 || newLabel.length > 32) {
+    await ctx.reply(
+      "❌ Name must be 1–32 characters. Tap ✏️ Rename to try again.",
+      Markup.inlineKeyboard([[Markup.button.callback("⚙️ Manage Wallet", `wallet:${state.walletId}`)]])
+    );
+    return;
+  }
+
+  const owned = await getOwnedWallet(telegramId, state.walletId);
+  if (!owned) {
+    await ctx.reply("❌ Wallet not found.");
+    return;
+  }
+
+  await db
+    .update(walletsTable)
+    .set({ label: newLabel })
+    .where(eq(walletsTable.id, state.walletId));
+
+  await ctx.reply(
+    `✅ Wallet renamed to <b>${escapeHtml(newLabel)}</b>`,
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([
+        [
+          Markup.button.callback("⚙️ Manage Wallet", `wallet:${state.walletId}`),
+          Markup.button.callback("💼 Wallet Manager", "wallet_manager"),
+        ],
+      ]),
+    }
+  );
+}
+
+// ── Set active wallet ─────────────────────────────────────────────────────────
+export async function handleActivateWallet(ctx: Context, walletId: number): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  const owned = await getOwnedWallet(telegramId, walletId);
+  if (!owned) {
+    await ctx.reply("❌ Wallet not found.");
+    return;
+  }
+  const { user, wallet } = owned;
+
+  // Deactivate all wallets on this chain, then activate the selected one
+  await db
+    .update(walletsTable)
+    .set({ isActive: false })
+    .where(and(eq(walletsTable.userId, user.id), eq(walletsTable.chain, wallet.chain)));
+  await db
+    .update(walletsTable)
+    .set({ isActive: true })
+    .where(eq(walletsTable.id, wallet.id));
+
+  logger.info({ walletId, chain: wallet.chain, telegramId }, "Wallet set active");
+
+  // Re-render the detail screen with updated state
+  await handleWalletDetail(ctx, walletId);
+}
+
+// ── Export private key ────────────────────────────────────────────────────────
+export async function handleExportKey(ctx: Context, walletId: number): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  // Only ever expose keys in a private chat
+  if (ctx.chat?.type !== "private") {
+    await ctx.reply("⚠️ Key export only works in a private chat with the bot.");
+    return;
+  }
+
+  const owned = await getOwnedWallet(telegramId, walletId);
+  if (!owned) {
+    await ctx.reply("❌ Wallet not found.");
+    return;
+  }
+  const { wallet } = owned;
+
+  try {
+    const privateKey = decrypt(wallet.encryptedPrivateKey);
+
+    // Sent as a NEW message so it can be deleted independently
+    await ctx.reply(
+      [
+        `🔑 <b>Private Key Export — ${wallet.chain}</b>`,
+        `—`,
+        `🏷 <b>${escapeHtml(wallet.label)}</b>`,
+        `📬 <code>${wallet.address}</code>`,
+        ``,
+        `🔑 <b>Private Key:</b>`,
+        `<code>${privateKey}</code>`,
+        `—`,
+        `⚠️ <b>NEVER share this key.</b> Anyone holding it controls your funds.`,
+        `🗑 Delete this message as soon as you've saved the key.`,
+      ].join("\n"),
+      {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("🗑 Delete This Message", "del_msg")],
+          [Markup.button.callback("⚙️ Back to Wallet", `wallet:${wallet.id}`)],
+        ]),
+      }
+    );
+  } catch (err) {
+    logger.error({ err, walletId }, "Key export failed");
+    await ctx.reply("❌ Could not decrypt this wallet's key. Contact support.");
+  }
+}
+
+// ── Delete wallet (confirmation step) ────────────────────────────────────────
+export async function handleDeleteWallet(ctx: Context, walletId: number): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  const owned = await getOwnedWallet(telegramId, walletId);
+  if (!owned) {
+    await sendOrEdit(ctx, "❌ Wallet not found.", {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([[Markup.button.callback("💼 Wallet Manager", "wallet_manager")]]),
+    });
+    return;
+  }
+  const { wallet } = owned;
+
+  const text = [
+    `🗑 <b>Delete Wallet?</b>`,
+    `—`,
+    `🏷 <b>${escapeHtml(wallet.label)}</b> [${wallet.chain}]${wallet.isActive ? " 🟢 Active" : ""}`,
+    `📬 <code>${wallet.address}</code>`,
+    `—`,
+    `⚠️ <b>This permanently removes the encrypted key from the bot.</b>`,
+    `• Funds stay on-chain, but the bot loses all access`,
+    `• Export the private key FIRST if you haven't backed it up`,
+    `• This cannot be undone`,
+  ].join("\n");
+
+  await sendOrEdit(ctx, text, {
+    parse_mode: "HTML",
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback("🔑 Export Key First", `wallet_export:${wallet.id}`)],
+      [
+        Markup.button.callback("❌ Cancel", `wallet:${wallet.id}`),
+        Markup.button.callback("🗑 Yes, Delete", `wallet_del_yes:${wallet.id}`),
+      ],
+    ]),
+  });
+}
+
+// ── Delete wallet (confirmed) ─────────────────────────────────────────────────
+export async function handleDeleteWalletConfirm(ctx: Context, walletId: number): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  const owned = await getOwnedWallet(telegramId, walletId);
+  if (!owned) {
+    await sendOrEdit(ctx, "❌ Wallet not found (already deleted?).", {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([[Markup.button.callback("💼 Wallet Manager", "wallet_manager")]]),
+    });
+    return;
+  }
+  const { user, wallet } = owned;
+
+  await db.delete(walletsTable).where(eq(walletsTable.id, wallet.id));
+
+  // If the deleted wallet was active, promote the most recent remaining wallet
+  let promoted: string | null = null;
+  if (wallet.isActive) {
+    const remaining = await db.query.walletsTable.findFirst({
+      where: and(eq(walletsTable.userId, user.id), eq(walletsTable.chain, wallet.chain)),
+      orderBy: [desc(walletsTable.createdAt)],
+    });
+    if (remaining) {
+      await db
+        .update(walletsTable)
+        .set({ isActive: true })
+        .where(eq(walletsTable.id, remaining.id));
+      promoted = remaining.label;
+    }
+  }
+
+  logger.info({ walletId, chain: wallet.chain, telegramId }, "Wallet deleted");
+
+  const text = [
+    `✅ <b>Wallet Deleted</b>`,
+    `—`,
+    `🏷 ${escapeHtml(wallet.label)} [${wallet.chain}]`,
+    `📬 <code>${wallet.address}</code>`,
+    promoted
+      ? `—\n🟢 <b>${escapeHtml(promoted)}</b> is now your active ${wallet.chain} wallet.`
+      : ``,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  await sendOrEdit(ctx, text, {
+    parse_mode: "HTML",
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback("💼 Wallet Manager", "wallet_manager")],
+      [Markup.button.callback("⬅️ Dashboard", "dashboard")],
+    ]),
+  });
 }

@@ -3,3 +3,4 @@
 - [Auto-snipe architecture](auto-snipe.md) — executeSolBuy shared core; triggerAutoSnipeBuy uses getBotRef; filters from sniperConfigs
 - [Railway deployment](railway-deploy.md) — Dockerfile at root, multi-stage, pnpm monorepo; rediss:// for Upstash TLS
 - [Schema field names](schema-fields.md) — autoBuyAmountNative (not Sol), minLiquidityUsd is text, getNativeTokenPrice returns string|number
+- [Telegraf conventions](telegraf-conventions.md) — never re-answer callbacks (global middleware does); new text flows must registerPendingClearer; callback_data ≤64 bytes; safeReply for command+button handlers
