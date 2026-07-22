@@ -7,13 +7,16 @@ RUN npm install -g pnpm@10
 WORKDIR /app
 
 # Copy workspace manifests and lockfile first (layer cache)
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json ./
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json tsconfig.json ./
 
 # Copy lib packages (workspace dependencies of api-server)
 COPY lib/ ./lib/
 
 # Copy the api-server artifact
 COPY artifacts/api-server/ ./artifacts/api-server/
+
+# Verify tsconfig.json exists before proceeding
+RUN ls -la tsconfig.json || (echo "ERROR: tsconfig.json not found" && exit 1)
 
 # Install all workspace dependencies
 RUN pnpm install --frozen-lockfile --ignore-scripts
@@ -33,7 +36,7 @@ RUN npm install -g pnpm@10
 WORKDIR /app
 
 # Copy workspace manifests for pnpm install --prod
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json ./
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json tsconfig.json ./
 COPY lib/ ./lib/
 COPY artifacts/api-server/package.json ./artifacts/api-server/package.json
 
