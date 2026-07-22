@@ -21,8 +21,8 @@ RUN pnpm install --frozen-lockfile --ignore-scripts
 # Build composite TypeScript libs (generates declarations needed by api-server)
 RUN pnpm run typecheck:libs
 
-# Build the api-server (esbuild bundle)
-RUN pnpm --filter @workspace/api-server run build
+# Build the api-server (esbuild bundle) — verbose output for debugging
+RUN pnpm --filter @workspace/api-server run build && ls -la ./artifacts/api-server/dist/ || (echo "Build failed - dist not found" && exit 1)
 
 
 ### ── Stage 2: Runtime ──────────────────────────────────────────────────────
@@ -36,7 +36,12 @@ WORKDIR /app
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json ./
 COPY lib/ ./lib/
 COPY artifacts/api-server/package.json ./artifacts/api-server/package.json
-COPY artifacts/api-server/dist/ ./artifacts/api-server/dist/
+
+# Copy built artifacts from builder stage
+COPY --from=builder /app/artifacts/api-server/dist/ ./artifacts/api-server/dist/
+
+# Verify dist exists before proceeding
+RUN ls -la ./artifacts/api-server/dist/ || (echo "ERROR: dist folder missing from builder stage" && exit 1)
 
 # Install production dependencies only (externals needed at runtime)
 RUN pnpm install --frozen-lockfile --prod --ignore-scripts
