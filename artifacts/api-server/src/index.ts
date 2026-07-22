@@ -15,8 +15,7 @@ process.on("unhandledRejection", (reason) => {
 });
 
 // ── Port validation ───────────────────────────────────────────────────────
-const rawPort = process.env["PORT"];
-if (!rawPort) throw new Error("PORT environment variable is required");
+const rawPort = process.env["PORT"] || "8080";
 const port = Number(rawPort);
 if (Number.isNaN(port) || port <= 0) throw new Error(`Invalid PORT: "${rawPort}"`);
 
@@ -69,7 +68,7 @@ if (botToken) {
 }
 
 // ── Start HTTP server ─────────────────────────────────────────────────────
-app.listen(port, (err?: Error) => {
+const server = app.listen(port, (err?: Error) => {
   if (err) {
     logger.error({ err }, "Error starting server");
     process.exit(1);
@@ -79,10 +78,41 @@ app.listen(port, (err?: Error) => {
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────
 const shutdown = async (signal: string) => {
-  logger.info({ signal }, "Shutting down");
-  if (bot) bot.stop(signal);
-  if (redis) await redis.quit();
-  process.exit(0);
+  logger.info({ signal }, "Shutting down gracefully");
+  
+  // Stop accepting new connections
+  server.close(async () => {
+    logger.info("HTTP server closed");
+    
+    // Stop the bot
+    if (bot) {
+      try {
+        bot.stop(signal);
+        logger.info("Bot stopped");
+      } catch (err) {
+        logger.warn({ err }, "Error stopping bot");
+      }
+    }
+    
+    // Close Redis connection
+    if (redis) {
+      try {
+        await redis.quit();
+        logger.info("Redis disconnected");
+      } catch (err) {
+        logger.warn({ err }, "Error closing Redis");
+      }
+    }
+    
+    logger.info("Shutdown complete");
+    process.exit(0);
+  });
+  
+  // Force exit after 30 seconds if graceful shutdown takes too long
+  setTimeout(() => {
+    logger.error("Graceful shutdown timeout — forcing exit");
+    process.exit(1);
+  }, 30_000);
 };
 
 process.once("SIGINT", () => shutdown("SIGINT"));
