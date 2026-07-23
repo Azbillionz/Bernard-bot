@@ -55,4 +55,5 @@ WORKDIR /app/artifacts/api-server
 
 EXPOSE 8080
 
-CMD ["node", "--enable-source-maps", "./dist/index.mjs"]
+CMD ["sh", "-c", "pnpm --filter @workspace/db run push-force; node --enable-source-maps ./dist/index.mjs"]
+
