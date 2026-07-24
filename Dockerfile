@@ -19,7 +19,8 @@ COPY artifacts/api-server/ ./artifacts/api-server/
 RUN ls -la tsconfig.json || (echo "ERROR: tsconfig.json not found" && exit 1)
 
 # Install all workspace dependencies
-RUN pnpm install --frozen-lockfile --ignore-scripts
+RUN pnpm install --no-frozen-lockfile --ignore-scripts
+
 
 # Build composite TypeScript libs (generates declarations needed by api-server)
 RUN pnpm run typecheck:libs
@@ -47,7 +48,8 @@ COPY --from=builder /app/artifacts/api-server/dist/ ./artifacts/api-server/dist/
 RUN ls -la ./artifacts/api-server/dist/ || (echo "ERROR: dist folder missing from builder stage" && exit 1)
 
 # Install production dependencies only (externals needed at runtime)
-RUN pnpm install --frozen-lockfile --prod --ignore-scripts
+RUN pnpm install --no-frozen-lockfile --prod --ignore-scripts
+
 
 ENV NODE_ENV=production
 
