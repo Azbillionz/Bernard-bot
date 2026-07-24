@@ -192,10 +192,10 @@ async function executeBuy(ctx: Context, ca: string, amount: number): Promise<voi
       });
       txHash = result.txHash;
     } else {
-      if (!process.env["ONEINCH_API_KEY"]) {
+            if (!process.env["ZEROX_API_KEY"]) {
         const dexUrl = `https://app.uniswap.org/#/swap?outputCurrency=${ca}`;
         await ctx.reply(
-          `⚠️ <b>In-bot EVM swaps require a 1inch API key.</b>\n\nTrade directly:\n<a href="${dexUrl}">🔗 Uniswap — ${ca.slice(0, 8)}…</a>`,
+          `⚠️ <b>In-bot EVM swaps require a 0x API key.</b>\n\nTrade directly:\n<a href="${dexUrl}">🔗 Uniswap — ${ca.slice(0, 8)}…</a>`,
           { parse_mode: "HTML", link_preview_options: { is_disabled: true } }
         );
         await db.update(tradesTable).set({ status: "FAILED" }).where(eq(tradesTable.id, trade!.id));
