@@ -1,7 +1,21 @@
 /**
- * PumpFun REST API — token info for pre-graduation meme coins.
- * These tokens often don't appear on DexScreener or GeckoTerminal yet.
+ * PumpFun token info — read directly from Solana on-chain accounts.
+ *
+ * pump.fun's old REST API (frontend-api.pump.fun) is retired, and their
+ * current API (frontend-api-v3.pump.fun) requires a logged-in wallet
+ * session (JWT) for single-coin lookups — not usable from a server-side
+ * bot. Every pre-graduation pump.fun token has its price/reserve state
+ * stored on-chain in a "bonding curve" account (PDA of the pump.fun
+ * program), and its name/symbol/socials in a standard Metaplex metadata
+ * account — both freely readable via any Solana RPC, no key required.
  */
+
+import { Connection, PublicKey } from "@solana/web3.js";
+
+const PUMP_PROGRAM_ID = new PublicKey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
+const BONDING_CURVE_SEED = Buffer.from("bonding-curve");
+const METADATA_PROGRAM_ID = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
+const METADATA_SEED = Buffer.from("metadata");
 
 export interface PumpFunToken {
   mint: string;
@@ -23,63 +37,121 @@ export interface PumpFunToken {
   virtualTokenReserves: number;
 }
 
-interface RawPumpCoin {
-  mint?: string;
-  name?: string;
-  symbol?: string;
+function getConnection(): Connection {
+  const rpcUrl = process.env["SOLANA_RPC_URL"] ?? "https://api.mainnet-beta.solana.com";
+  return new Connection(rpcUrl, "confirmed");
+}
+
+/** Parse a Metaplex Token Metadata account: name/symbol/uri are borsh
+ *  length-prefixed strings (4-byte LE length + UTF8 bytes), back to back,
+ *  starting right after [key(1) + updateAuthority(32) + mint(32)]. */
+async function fetchMetaplexMetadata(
+  connection: Connection,
+  mint: PublicKey
+): Promise<{ name: string; symbol: string; uri: string } | null> {
+  try {
+    const [metadataPda] = PublicKey.findProgramAddressSync(
+      [METADATA_SEED, METADATA_PROGRAM_ID.toBuffer(), mint.toBuffer()],
+      METADATA_PROGRAM_ID
+    );
+    const info = await connection.getAccountInfo(metadataPda);
+    if (!info) return null;
+    const data = info.data;
+    let offset = 1 + 32 + 32; // key + updateAuthority + mint
+
+    const nameLen = data.readUInt32LE(offset); offset += 4;
+    const name = data.slice(offset, offset + nameLen).toString("utf8").replace(/\0/g, "").trim();
+    offset += nameLen;
+
+    const symbolLen = data.readUInt32LE(offset); offset += 4;
+    const symbol = data.slice(offset, offset + symbolLen).toString("utf8").replace(/\0/g, "").trim();
+    offset += symbolLen;
+
+    const uriLen = data.readUInt32LE(offset); offset += 4;
+    const uri = data.slice(offset, offset + uriLen).toString("utf8").replace(/\0/g, "").trim();
+
+    return { name, symbol, uri };
+  } catch {
+    return null;
+  }
+}
+
+/** Best-effort fetch of the off-chain JSON (description/socials/image)
+ *  that the on-chain metadata's `uri` points to. Never blocks the core
+ *  price/reserve data if it fails or times out. */
+async function fetchOffchainJson(uri: string): Promise<{
   description?: string;
-  image_uri?: string;
+  image?: string;
   twitter?: string;
   telegram?: string;
   website?: string;
-  created_timestamp?: number;
-  usd_market_cap?: number;
-  bonding_curve_progress?: number;
-  complete?: boolean;
-  total_supply?: number;
-  virtual_sol_reserves?: number;
-  virtual_token_reserves?: number;
+  createdOn?: number;
+} | null> {
+  if (!uri) return null;
+  try {
+    const res = await fetch(uri, { signal: AbortSignal.timeout(5_000) });
+    if (!res.ok) return null;
+    return (await res.json()) as Record<string, unknown> as {
+      description?: string;
+      image?: string;
+      twitter?: string;
+      telegram?: string;
+      website?: string;
+    };
+  } catch {
+    return null;
+  }
 }
 
-const PUMP_API = "https://frontend-api.pump.fun";
-
-export async function getPumpFunToken(
-  mint: string
-): Promise<PumpFunToken | null> {
+export async function getPumpFunToken(mint: string): Promise<PumpFunToken | null> {
   try {
-    const res = await fetch(`${PUMP_API}/coins/${mint}`, {
-      headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(8_000),
-    });
-    if (!res.ok) return null;
-    const d = (await res.json()) as RawPumpCoin;
-    if (!d.mint) return null;
+    const connection = getConnection();
+    const mintPubkey = new PublicKey(mint);
 
-    // Derive price from virtual reserves (k = sol * tokens, price = sol/tokens)
-    const solRes = (d.virtual_sol_reserves ?? 0) / 1e9; // lamports → SOL
-    const tokRes = (d.virtual_token_reserves ?? 0) / 1e6; // micro-tokens → tokens
+    const [bondingCurve] = PublicKey.findProgramAddressSync(
+      [BONDING_CURVE_SEED, mintPubkey.toBuffer()],
+      PUMP_PROGRAM_ID
+    );
+
+    const curveInfo = await connection.getAccountInfo(bondingCurve);
+    if (!curveInfo || curveInfo.data.length < 49) return null; // never launched via pump.fun
+
+    const data = curveInfo.data;
+    // Layout after 8-byte Anchor discriminator: 5x u64 LE + 1 bool
+    const virtualTokenReserves = data.readBigUInt64LE(8);
+    const virtualSolReserves = data.readBigUInt64LE(16);
+    const tokenTotalSupply = data.readBigUInt64LE(40);
+    const complete = data[48] === 1;
+
+    const solRes = Number(virtualSolReserves) / 1e9;
+    const tokRes = Number(virtualTokenReserves) / 1e6;
     const priceNative = tokRes > 0 ? solRes / tokRes : 0;
 
-    // We need SOL/USD price to convert — use a rough proxy
-    // Will be enriched by caller using chainPrice service
+    // Migration to PumpSwap has historically occurred around ~85 SOL of
+    // real reserves — used only as a rough progress indicator, not exact.
+    const progress = complete ? 100 : Math.min((solRes / 85) * 100, 99);
+
+    const meta = await fetchMetaplexMetadata(connection, mintPubkey);
+    const offchain = meta?.uri ? await fetchOffchainJson(meta.uri) : null;
+
     return {
-      mint: d.mint,
-      name: d.name ?? "Unknown",
-      symbol: d.symbol ?? "?",
-      description: d.description ?? "",
-      imageUri: d.image_uri ?? "",
-      twitter: d.twitter,
-      telegram: d.telegram,
-      website: d.website,
-      createdTimestamp: d.created_timestamp ?? 0,
-      usdMarketCap: d.usd_market_cap ?? 0,
-      bondingCurveProgress: (d.bonding_curve_progress ?? 0) * 100,
-      complete: d.complete ?? false,
-      totalSupply: d.total_supply ?? 0,
+      mint,
+      name: meta?.name || "Unknown",
+      symbol: meta?.symbol || "?",
+      description: offchain?.description ?? "",
+      imageUri: offchain?.image ?? "",
+      twitter: offchain?.twitter,
+      telegram: offchain?.telegram,
+      website: offchain?.website,
+      createdTimestamp: 0,
+      usdMarketCap: 0, // enriched by caller via priceUsd × totalSupply
+      bondingCurveProgress: progress,
+      complete,
+      totalSupply: Number(tokenTotalSupply) / 1e6,
       priceNative,
-      priceUsd: 0, // enriched by caller
-      virtualSolReserves: d.virtual_sol_reserves ?? 0,
-      virtualTokenReserves: d.virtual_token_reserves ?? 0,
+      priceUsd: 0, // enriched by caller using chainPrice service
+      virtualSolReserves: Number(virtualSolReserves),
+      virtualTokenReserves: Number(virtualTokenReserves),
     };
   } catch {
     return null;
@@ -115,7 +187,9 @@ export function formatPumpFunMessage(
     `🏦 MCap: ${mcUsd}`,
     `📈 Bonding: [${progressBar}] ${progress}%${token.complete ? " ✅ Graduated" : ""}`,
     ...(links.length ? [`🔗 ${links.join(" | ")}`] : []),
-    `📝 ${token.description.slice(0, 120)}${token.description.length > 120 ? "…" : ""}`,
+    ...(token.description
+      ? [`📝 ${token.description.slice(0, 120)}${token.description.length > 120 ? "…" : ""}`]
+      : []),
   ]
     .filter(Boolean)
     .join("\n");
