@@ -70,8 +70,11 @@ function parsePool(
     liquidityUsd: parseFloat(attr.reserve_in_usd ?? "0"),
     fdvUsd: attr.fdv_usd ? parseFloat(attr.fdv_usd) : null,
     marketCapUsd: attr.market_cap_usd ? parseFloat(attr.market_cap_usd) : null,
-    network,
+        network,
     dexId: rel.dex?.data?.id ?? "unknown",
+    buys24h: attr.transactions?.h24?.buys,
+    sells24h: attr.transactions?.h24?.sells,
+    poolCreatedAt: attr.pool_created_at ? new Date(attr.pool_created_at).getTime() : undefined,
   };
 }
 
