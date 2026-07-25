@@ -35,8 +35,9 @@ export async function getJupiterQuote(
     outputMint,
     amount: String(amountLamports),
     slippageBps: String(slippageBps),
-    platformFeeBps: String(PLATFORM_FEE_BPS),
-    ...(feeWallet ? { feeAccount: feeWallet } : {}),
+    // platformFeeBps requires a matching feeAccount — Jupiter rejects the
+    // swap build if one is sent without the other, so only send both or neither.
+    ...(feeWallet ? { platformFeeBps: String(PLATFORM_FEE_BPS), feeAccount: feeWallet } : {}),
   });
   try {
     const res = await fetch(`${JUPITER_BASE}/quote?${params.toString()}`, {
