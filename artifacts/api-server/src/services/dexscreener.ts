@@ -1,11 +1,3 @@
-/**
- * DexScreener service — primary market data source.
- * Trending / runners fall back to GeckoTerminal when DexScreener returns nothing.
- */
-
-const BASE_URL =
-  process.env["DEXSCREENER_API_URL"] ?? "https://api.dexscreener.com";
-
 export interface TokenPair {
   chainId: string;
   dexId: string;
