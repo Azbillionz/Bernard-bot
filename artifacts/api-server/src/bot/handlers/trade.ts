@@ -147,6 +147,22 @@ async function executeBuy(ctx: Context, ca: string, amount: number): Promise<voi
     return;
   }
 
+  const detectedType = ca.startsWith("0x") ? "EVM" : "SOL";
+  if (detectedType === "SOL" && user.activeChain !== "SOL") {
+    await ctx.reply(
+      `⚠️ This is a <b>Solana</b> token, but your active wallet is <b>${user.activeChain}</b>.\nSwitch to your SOL wallet in 💼 Wallet Manager, then try again.`,
+      { parse_mode: "HTML", ...Markup.inlineKeyboard([[Markup.button.callback("💼 Wallet Manager", "wallet_manager")]]) }
+    );
+    return;
+  }
+  if (detectedType === "EVM" && user.activeChain === "SOL") {
+    await ctx.reply(
+      `⚠️ This is an <b>EVM</b> token, but your active wallet is <b>SOL</b>.\nSwitch to an ETH/BASE/BSC wallet in 💼 Wallet Manager, then try again.`,
+      { parse_mode: "HTML", ...Markup.inlineKeyboard([[Markup.button.callback("💼 Wallet Manager", "wallet_manager")]]) }
+    );
+    return;
+  }
+
   const config = await db.query.sniperConfigsTable.findFirst({
     where: eq(sniperConfigsTable.userId, user.id),
   });
@@ -192,7 +208,7 @@ async function executeBuy(ctx: Context, ca: string, amount: number): Promise<voi
       });
       txHash = result.txHash;
     } else {
-            if (!process.env["ZEROX_API_KEY"]) {
+      if (!process.env["ZEROX_API_KEY"]) {
         const dexUrl = `https://app.uniswap.org/#/swap?outputCurrency=${ca}`;
         await ctx.reply(
           `⚠️ <b>In-bot EVM swaps require a 0x API key.</b>\n\nTrade directly:\n<a href="${dexUrl}">🔗 Uniswap — ${ca.slice(0, 8)}…</a>`,
