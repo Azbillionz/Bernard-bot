@@ -1,3 +1,17 @@
+/**
+ * GeckoTerminal public API (no key required)
+ * Used as fallback when DexScreener has no data for a token.
+ */
+
+const GT_BASE = "https://api.geckoterminal.com/api/v2";
+
+const CHAIN_MAP: Record<string, string> = {
+  SOL: "solana",
+  ETH: "eth",
+  BASE: "base",
+  BSC: "bsc",
+};
+
 export interface GeckoPool {
   name: string;
   address: string;
@@ -32,17 +46,6 @@ interface GTPoolAttr {
   transactions?: { h24?: { buys?: number; sells?: number } };
 }
 
-interface GTPoolAttr {
-  name?: string;
-  base_token_price_usd?: string;
-  price_change_percentage?: { m5?: string; h1?: string; h24?: string };
-  volume_usd?: { h24?: string };
-  reserve_in_usd?: string;
-  fdv_usd?: string;
-  market_cap_usd?: string;
-  address?: string;
-}
-
 interface GTRelationships {
   base_token?: { data?: { id?: string } };
   dex?: { data?: { id?: string } };
@@ -70,7 +73,7 @@ function parsePool(
     liquidityUsd: parseFloat(attr.reserve_in_usd ?? "0"),
     fdvUsd: attr.fdv_usd ? parseFloat(attr.fdv_usd) : null,
     marketCapUsd: attr.market_cap_usd ? parseFloat(attr.market_cap_usd) : null,
-        network,
+    network,
     dexId: rel.dex?.data?.id ?? "unknown",
     buys24h: attr.transactions?.h24?.buys,
     sells24h: attr.transactions?.h24?.sells,
