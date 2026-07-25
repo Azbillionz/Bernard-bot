@@ -1,9 +1,16 @@
 /**
- * Jupiter V6 API — Solana token swaps with 1% platform fee (100 bps).
+ * Jupiter Swap API — Solana token swaps with 1% platform fee (100 bps).
  * All swaps are pre-simulated via simulateTransaction before submission.
+ *
+ * NOTE: quote-api.jup.ag/v6 was retired (deprecated Oct 2025). Current paths
+ * are under /swap/v1 — free tier via lite-api.jup.ag (no key), or
+ * api.jup.ag with a free API key from portal.jup.ag for higher reliability.
  */
 
-const JUPITER_QUOTE_API = "https://quote-api.jup.ag/v6";
+const JUPITER_API_KEY = process.env["JUPITER_API_KEY"] ?? "";
+const JUPITER_BASE = JUPITER_API_KEY
+  ? "https://api.jup.ag/swap/v1"
+  : "https://lite-api.jup.ag/swap/v1";
 const PLATFORM_FEE_BPS = 100; // 1%
 
 export interface JupiterQuote {
@@ -32,7 +39,8 @@ export async function getJupiterQuote(
     ...(feeWallet ? { feeAccount: feeWallet } : {}),
   });
   try {
-    const res = await fetch(`${JUPITER_QUOTE_API}/quote?${params.toString()}`, {
+    const res = await fetch(`${JUPITER_BASE}/quote?${params.toString()}`, {
+      headers: JUPITER_API_KEY ? { "x-api-key": JUPITER_API_KEY } : {},
       signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) return null;
@@ -48,9 +56,12 @@ export async function buildJupiterSwapTx(
   prioritizationFeeLamports = 5_000
 ): Promise<string | null> {
   try {
-    const res = await fetch(`${JUPITER_QUOTE_API}/swap`, {
+    const res = await fetch(`${JUPITER_BASE}/swap`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(JUPITER_API_KEY ? { "x-api-key": JUPITER_API_KEY } : {}),
+      },
       body: JSON.stringify({
         quoteResponse: quote,
         userPublicKey,
