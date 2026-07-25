@@ -1,17 +1,3 @@
-/**
- * GeckoTerminal public API (no key required)
- * Used as fallback when DexScreener has no data for a token.
- */
-
-const GT_BASE = "https://api.geckoterminal.com/api/v2";
-
-const CHAIN_MAP: Record<string, string> = {
-  SOL: "solana",
-  ETH: "eth",
-  BASE: "base",
-  BSC: "bsc",
-};
-
 export interface GeckoPool {
   name: string;
   address: string;
@@ -28,6 +14,22 @@ export interface GeckoPool {
   marketCapUsd: number | null;
   network: string;
   dexId: string;
+  buys24h?: number;
+  sells24h?: number;
+  poolCreatedAt?: number; // unix ms
+}
+
+interface GTPoolAttr {
+  name?: string;
+  base_token_price_usd?: string;
+  price_change_percentage?: { m5?: string; h1?: string; h24?: string };
+  volume_usd?: { h24?: string };
+  reserve_in_usd?: string;
+  fdv_usd?: string;
+  market_cap_usd?: string;
+  address?: string;
+  pool_created_at?: string;
+  transactions?: { h24?: { buys?: number; sells?: number } };
 }
 
 interface GTPoolAttr {
