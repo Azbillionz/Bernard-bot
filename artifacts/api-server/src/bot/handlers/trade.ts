@@ -121,6 +121,22 @@ async function executeSolBuy(params: SolBuyParams): Promise<SolBuyResult> {
   return { txHash, outAmount: quote.outAmount };
 }
 
+async function getSolBalanceLamports(address: string): Promise<number> {
+  const rpcUrl = process.env["SOLANA_RPC_URL"] ?? "https://api.mainnet-beta.solana.com";
+  try {
+    const res = await fetch(rpcUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getBalance", params: [address] }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const data = (await res.json()) as { result?: { value?: number } };
+    return data.result?.value ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
 // ── Manual buy (ctx-based) ────────────────────────────────────────────────
 
 async function executeBuy(ctx: Context, ca: string, amount: number): Promise<void> {
@@ -163,6 +179,20 @@ async function executeBuy(ctx: Context, ca: string, amount: number): Promise<voi
     return;
   }
 
+  if (detectedType === "SOL") {
+    const lamportsNeeded = Math.round(amount * 1e9) + 10_000_000; // + ~0.01 SOL buffer for fees/rent
+    const balanceLamports = await getSolBalanceLamports(wallet.address);
+    if (balanceLamports < lamportsNeeded) {
+      const haveSol = (balanceLamports / 1e9).toFixed(4);
+      const needSol = (lamportsNeeded / 1e9).toFixed(4);
+      await ctx.reply(
+        `⚠️ <b>Insufficient balance.</b>\nYour wallet has <b>${haveSol} SOL</b>, but this buy needs ~<b>${needSol} SOL</b> (including network fees).\n\n📥 Fund your wallet first:\n<code>${wallet.address}</code>`,
+        { parse_mode: "HTML", ...Markup.inlineKeyboard([[Markup.button.callback("💼 Wallet Manager", "wallet_manager")]]) }
+      );
+      return;
+    }
+  }
+
   const config = await db.query.sniperConfigsTable.findFirst({
     where: eq(sniperConfigsTable.userId, user.id),
   });
@@ -188,7 +218,7 @@ async function executeBuy(ctx: Context, ca: string, amount: number): Promise<voi
   }).returning();
 
   await ctx.reply(
-    `⏳ <b>Buy Order Submitted</b>\n💰 Buying ${amount} ${user.activeChain} of <b>${tokenSymbol}</b>\n🔐 Simulating transaction…`,
+    `⏳ <b>Buy Order Submitted</b>\n💰 Buying ${amount} ${user.activeChain} of <b>${tokenSymbol}</b>\n🔐 Submitting to the blockchain…`,
     { parse_mode: "HTML" }
   );
 
@@ -218,14 +248,28 @@ async function executeBuy(ctx: Context, ca: string, amount: number): Promise<voi
         return;
       }
       const amountWei = BigInt(Math.round(amount * 1e18)).toString();
-      const swap = await get1inchSwap(user.activeChain, EVM_NATIVE, ca, amountWei, wallet.address, slippageBps / 100);
-      if (!swap) throw new Error("1inch quote failed");
-      const simResult = await simulateEvmTx(wallet.address, swap.to, swap.data, user.activeChain);
-      if (!simResult.success) throw new Error(`EVM simulation failed: ${simResult.error}`);
       const { Wallet, JsonRpcProvider } = await import("ethers");
       const rpcMap: Record<string, string> = { ETH: "ETH_RPC_URL", BASE: "BASE_RPC_URL", BSC: "BSC_RPC_URL" };
       const rpcUrl = process.env[rpcMap[user.activeChain] ?? ""] ?? "";
       const provider = new JsonRpcProvider(rpcUrl);
+
+      const balanceWei = await provider.getBalance(wallet.address);
+      const neededWei = BigInt(amountWei) + BigInt(3_000_000_000_000_000); // + ~0.003 native for gas
+      if (balanceWei < neededWei) {
+        const haveNative = (Number(balanceWei) / 1e18).toFixed(5);
+        const needNative = (Number(neededWei) / 1e18).toFixed(5);
+        await ctx.reply(
+          `⚠️ <b>Insufficient balance.</b>\nYour wallet has <b>${haveNative} ${user.activeChain}</b>, but this buy needs ~<b>${needNative} ${user.activeChain}</b> (including gas).\n\n📥 Fund your wallet first:\n<code>${wallet.address}</code>`,
+          { parse_mode: "HTML", ...Markup.inlineKeyboard([[Markup.button.callback("💼 Wallet Manager", "wallet_manager")]]) }
+        );
+        await db.update(tradesTable).set({ status: "FAILED" }).where(eq(tradesTable.id, trade!.id));
+        return;
+      }
+
+      const swap = await get1inchSwap(user.activeChain, EVM_NATIVE, ca, amountWei, wallet.address, slippageBps / 100);
+      if (!swap) throw new Error("1inch quote failed");
+      const simResult = await simulateEvmTx(wallet.address, swap.to, swap.data, user.activeChain);
+      if (!simResult.success) throw new Error(`EVM simulation failed: ${simResult.error}`);
       const pk = decrypt(wallet.encryptedPrivateKey);
       const evmWallet = new Wallet(pk, provider);
       const tx = await evmWallet.sendTransaction({
@@ -344,6 +388,27 @@ export async function triggerAutoSnipeBuy(params: AutoSnipeParams): Promise<void
     const minLiq = parseFloat(config?.minLiquidityUsd ?? "0");
     if (minLiq > 0 && liquidityUsd < minLiq) {
       logger.info({ ca, liquidityUsd, minLiq }, "Auto-snipe skipped: liquidity below filter");
+      return;
+    }
+
+    // ── Balance check: don't fire a buy the wallet can't cover ────────────
+    const lamportsNeeded = Math.round(buyAmount * 1e9) + 10_000_000; // + ~0.01 SOL buffer for fees/rent
+    const balanceLamports = await getSolBalanceLamports(wallet.address);
+    if (balanceLamports < lamportsNeeded) {
+      const haveSol = (balanceLamports / 1e9).toFixed(4);
+      const needSol = (lamportsNeeded / 1e9).toFixed(4);
+      await send(
+        [
+          `⚡ <b>Auto-Snipe Skipped — Insufficient Balance</b>`,
+          `🪙 <b>${nameSafe}</b> (${symbolSafe})`,
+          `📍 CA: <code>${ca}</code>`,
+          `💰 Wallet has: <b>${haveSol} SOL</b>`,
+          `📉 Needed: <b>~${needSol} SOL</b> (your configured buy: ${buyAmount} SOL + fees)`,
+          ``,
+          `Fund your SOL wallet so auto-snipe can execute:`,
+          `<code>${wallet.address}</code>`,
+        ].join("\n")
+      );
       return;
     }
 
