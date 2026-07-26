@@ -50,8 +50,9 @@ import {
 import { handleBotStats } from "./handlers/botStats";
 import { handleHelpGuide } from "./handlers/helpGuide";
 import {
-  handleCAAnalysis,
+    handleCAAnalysis,
   handleAnalyzeCallback,
+  handleRugCheckCallback,
   detectCAType,
 } from "./handlers/caAnalysis";
 import {
