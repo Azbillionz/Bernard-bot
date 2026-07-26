@@ -126,7 +126,10 @@ interface ExtraButtonsOpts {
 }
 
 const tradeButtonsFor = (ca: string, opts: ExtraButtonsOpts = {}) => {
-  const utilityRow = [Markup.button.callback("📊 Track PnL", `price:${ca}`)];
+    const utilityRow: (ReturnType<typeof Markup.button.callback> | ReturnType<typeof Markup.button.url>)[] = [
+    Markup.button.callback("📊 Track PnL", `price:${ca}`),
+  ];
+
   if (opts.chartUrl) utilityRow.push(Markup.button.url("📈 Chart", opts.chartUrl));
   if (opts.rugcheckTarget) {
     utilityRow.push(Markup.button.callback("🔍 RugCheck", `rugcheck:${opts.rugcheckTarget}`));
