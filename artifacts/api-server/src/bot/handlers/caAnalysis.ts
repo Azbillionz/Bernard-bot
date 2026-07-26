@@ -17,6 +17,10 @@
  * Message format includes an auto-generated Score/Signal/Potential block
  * (see ../../services/tokenScore.ts) — a transparent formula built from
  * real liquidity/volume/momentum/security data, not a third-party opinion.
+ *
+ * Every result card also gets: 📊 Track PnL (live price + entry P&L),
+ * 📈 Chart (external link, when a pair/pool/pump.fun page exists), and
+ * 🔍 RugCheck (re-runs just the security scan standalone).
  */
 
 import type { Context } from "telegraf";
@@ -115,18 +119,33 @@ function fmtAge(ageMinutes?: number): string {
   return `${(ageMinutes / 1440).toFixed(1)} d`;
 }
 
-const tradeButtonsFor = (ca: string) => [
-  [
-    Markup.button.callback("💰 Buy 0.1", `buy:${ca}:0.1`),
-    Markup.button.callback("💰 Buy 0.5", `buy:${ca}:0.5`),
-    Markup.button.callback("💰 Buy Custom", `buy_custom:${ca}`),
-  ],
-  [
-    Markup.button.callback("📤 Sell 50%", `sell:${ca}:50`),
-    Markup.button.callback("📤 Sell 100%", `sell:${ca}:100`),
-  ],
-  [Markup.button.callback("⬅️ Dashboard", "dashboard")],
-];
+interface ExtraButtonsOpts {
+  chartUrl?: string;
+  /** Encoded as "SOL::<ca>" or "EVM:<CHAIN>:<ca>" — used by the rugcheck: callback. */
+  rugcheckTarget?: string;
+}
+
+const tradeButtonsFor = (ca: string, opts: ExtraButtonsOpts = {}) => {
+  const utilityRow = [Markup.button.callback("📊 Track PnL", `price:${ca}`)];
+  if (opts.chartUrl) utilityRow.push(Markup.button.url("📈 Chart", opts.chartUrl));
+  if (opts.rugcheckTarget) {
+    utilityRow.push(Markup.button.callback("🔍 RugCheck", `rugcheck:${opts.rugcheckTarget}`));
+  }
+
+  return [
+    [
+      Markup.button.callback("💰 Buy 0.1", `buy:${ca}:0.1`),
+      Markup.button.callback("💰 Buy 0.5", `buy:${ca}:0.5`),
+      Markup.button.callback("💰 Buy Custom", `buy_custom:${ca}`),
+    ],
+    [
+      Markup.button.callback("📤 Sell 50%", `sell:${ca}:50`),
+      Markup.button.callback("📤 Sell 100%", `sell:${ca}:100`),
+    ],
+    utilityRow,
+    [Markup.button.callback("⬅️ Dashboard", "dashboard")],
+  ];
+};
 
 /** Build the full scored card for a DexScreener pair. */
 function buildDexScreenerCard(pair: TokenPair, securityLines: string[], securityRisks: number): string {
@@ -281,8 +300,6 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<void> 
 
   const user = await db.query.usersTable.findFirst({ where: eq(usersTable.telegramId, telegramId) });
 
-  const tradeButtons = tradeButtonsFor(ca);
-
   // ═══════════════════════════════════════════════════════════════════════
   // SOLANA
   // ═══════════════════════════════════════════════════════════════════════
@@ -291,29 +308,38 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<void> 
     const pair = pairs[0];
     const securityRisks = countSecurityRisks("SOL", security);
     const securityLines = securityLinesFor("SOL", security);
+    const rugcheckTarget = `SOL::${ca}`;
 
     if (pair) {
       const fullText = buildDexScreenerCard(pair, securityLines, securityRisks);
+      const chartUrl = `https://dexscreener.com/solana/${pair.pairAddress}`;
       if (user) {
         void db.insert(signalsTable).values({
           userId: user.id, tokenAddress: ca, tokenSymbol: pair.baseToken.symbol,
           chain: "SOL", source: "MANUAL", priceUsd: pair.priceUsd ?? "0",
         });
       }
-      await ctx.reply(fullText, { parse_mode: "HTML", ...Markup.inlineKeyboard(tradeButtons) });
+      await ctx.reply(fullText, {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard(tradeButtonsFor(ca, { chartUrl, rugcheckTarget })),
+      });
       return;
     }
 
     const geckoPool = await searchGeckoToken(ca, "SOL");
     if (geckoPool) {
       const fullText = buildGeckoCard(geckoPool, securityLines, securityRisks);
+      const chartUrl = `https://www.geckoterminal.com/solana/pools/${geckoPool.address}`;
       if (user) {
         void db.insert(signalsTable).values({
           userId: user.id, tokenAddress: ca, tokenSymbol: geckoPool.baseTokenSymbol,
           chain: "SOL", source: "MANUAL", priceUsd: geckoPool.priceUsd,
         });
       }
-      await ctx.reply(fullText, { parse_mode: "HTML", ...Markup.inlineKeyboard(tradeButtons) });
+      await ctx.reply(fullText, {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard(tradeButtonsFor(ca, { chartUrl, rugcheckTarget })),
+      });
       return;
     }
 
@@ -321,6 +347,7 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<void> 
     if (pumpToken) {
       const solPrice = Number(await getNativeTokenPrice("SOL").catch(() => 0));
       const fullText = buildPumpFunCard(pumpToken, solPrice, securityLines, securityRisks);
+      const chartUrl = `https://pump.fun/coin/${ca}`;
       if (user) {
         const priceUsd = (pumpToken.priceNative * solPrice).toFixed(10);
         void db.insert(signalsTable).values({
@@ -331,7 +358,7 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<void> 
       await ctx.reply(fullText, {
         parse_mode: "HTML",
         link_preview_options: { is_disabled: true },
-        ...Markup.inlineKeyboard(tradeButtons),
+        ...Markup.inlineKeyboard(tradeButtonsFor(ca, { chartUrl, rugcheckTarget })),
       });
       return;
     }
@@ -339,7 +366,10 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<void> 
     const onchain = await getSolTokenOnchainMetadata(ca);
     if (onchain) {
       const fullText = buildOnchainOnlyCard("Solana", onchain.name, onchain.symbol, ca, securityLines);
-      await ctx.reply(fullText, { parse_mode: "HTML", ...Markup.inlineKeyboard(tradeButtons) });
+      await ctx.reply(fullText, {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard(tradeButtonsFor(ca, { rugcheckTarget })),
+      });
       return;
     }
 
@@ -369,6 +399,8 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<void> 
     const securityRisks = countSecurityRisks("EVM", security);
     const securityLines = securityLinesFor("EVM", security);
     const fullText = buildDexScreenerCard(evmPair, securityLines, securityRisks);
+    const chartUrl = `https://dexscreener.com/${evmPair.chainId}/${evmPair.pairAddress}`;
+    const rugcheckTarget = `EVM:${resolvedChain}:${ca}`;
 
     if (user) {
       void db.insert(signalsTable).values({
@@ -376,7 +408,10 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<void> 
         chain: resolvedChain, source: "MANUAL", priceUsd: evmPair.priceUsd ?? "0",
       });
     }
-    await ctx.reply(fullText, { parse_mode: "HTML", ...Markup.inlineKeyboard(tradeButtons) });
+    await ctx.reply(fullText, {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard(tradeButtonsFor(ca, { chartUrl, rugcheckTarget })),
+    });
     return;
   }
 
@@ -391,6 +426,8 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<void> 
     const securityRisks = countSecurityRisks("EVM", security);
     const securityLines = securityLinesFor("EVM", security);
     const fullText = buildGeckoCard(geckoHit, securityLines, securityRisks);
+    const chartUrl = `https://www.geckoterminal.com/${geckoHit.network}/pools/${geckoHit.address}`;
+    const rugcheckTarget = `EVM:${resolvedChain}:${ca}`;
 
     if (user) {
       void db.insert(signalsTable).values({
@@ -398,7 +435,10 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<void> 
         chain: resolvedChain, source: "MANUAL", priceUsd: geckoHit.priceUsd,
       });
     }
-    await ctx.reply(fullText, { parse_mode: "HTML", ...Markup.inlineKeyboard(tradeButtons) });
+    await ctx.reply(fullText, {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard(tradeButtonsFor(ca, { chartUrl, rugcheckTarget })),
+    });
     return;
   }
 
@@ -408,7 +448,11 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<void> 
     const security = await checkEvmToken(onchainEvm.chain, ca);
     const securityLines = securityLinesFor("EVM", security);
     const fullText = buildOnchainOnlyCard(onchainEvm.chain, onchainEvm.name, onchainEvm.symbol, ca, securityLines);
-    await ctx.reply(fullText, { parse_mode: "HTML", ...Markup.inlineKeyboard(tradeButtons) });
+    const rugcheckTarget = `EVM:${onchainEvm.chain}:${ca}`;
+    await ctx.reply(fullText, {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard(tradeButtonsFor(ca, { rugcheckTarget })),
+    });
     return;
   }
 
@@ -431,4 +475,42 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<void> 
  */
 export async function handleAnalyzeCallback(ctx: Context, ca: string): Promise<void> {
   await handleCAAnalysis(ctx, ca);
+}
+
+/**
+ * Standalone RugCheck view — re-runs just the GoPlus security scan for a
+ * known chain (already resolved by handleCAAnalysis, encoded in the
+ * "rugcheck:<TYPE>:<CHAIN>:<ca>" callback) and shows it on its own,
+ * without redoing the whole price/liquidity lookup.
+ */
+export async function handleRugCheckCallback(ctx: Context, target: string): Promise<void> {
+  const parts = target.split(":");
+  const type = parts[0] as "SOL" | "EVM";
+  let chain: string;
+  let ca: string;
+  if (type === "SOL") {
+    chain = "SOL";
+    ca = parts.slice(2).join(":");
+  } else {
+    chain = parts[1] ?? "ETH";
+    ca = parts.slice(2).join(":");
+  }
+  if (!ca) return;
+
+  const security = type === "SOL" ? await checkSolanaToken(ca) : await checkEvmToken(chain, ca);
+  const risks = countSecurityRisks(type === "SOL" ? "SOL" : "EVM", security);
+  const lines = securityLinesFor(type === "SOL" ? "SOL" : "EVM", security);
+
+  const verdict = risks === 0 ? "✅ No red flags detected" : `⚠️ ${risks} risk flag(s) found`;
+
+  await ctx.reply(
+    [`🔍 <b>RugCheck</b> — ${chain}`, `📍 CA: <code>${ca}</code>`, `—`, ...lines, `—`, verdict].join("\n"),
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("🔬 Full Analysis", `analyze:${ca}`)],
+        [Markup.button.callback("⬅️ Dashboard", "dashboard")],
+      ]),
+    }
+  );
 }
