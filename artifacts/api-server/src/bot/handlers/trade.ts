@@ -1,6 +1,6 @@
 /**
  * Trade execution handler.
- * SOL: Jupiter V6 → simulate → Jito bundle (1% platform fee via platformFeeBps)
+ * SOL: Jupiter V6 → simulate → Jito bundle (no platform fee — see PLATFORM_FEE_BPS)
  * EVM: 1inch swap → eth_call simulate → direct/Flashbots
  *
  * Also exports triggerAutoSnipeBuy — used by the PumpFun listener for auto-sniping —
@@ -32,7 +32,7 @@ import { registerPendingClearer } from "../../lib/pendingFlows";
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const EVM_NATIVE = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
-const PLATFORM_FEE_BPS = 100; // 1%
+const PLATFORM_FEE_BPS = 0; // No platform fee — this bot doesn't take a cut
 
 // ── Pending custom buy state ──────────────────────────────────────────────
 const pendingCustomBuy = new Map<number, { ca: string }>();
@@ -290,7 +290,6 @@ async function executeBuy(ctx: Context, ca: string, amount: number): Promise<voi
         `💰 Spent: <b>${amount} ${user.activeChain}</b>`,
         `💲 Price at entry: <b>${parseFloat(priceUsd).toFixed(8)}</b>`,
         `🔗 TX: <code>${txHash}</code>`,
-        `💸 1% platform fee applied`,
         `—`,
         `Use the buttons below to sell your position.`,
       ].join("\n"),
@@ -464,7 +463,6 @@ export async function triggerAutoSnipeBuy(params: AutoSnipeParams): Promise<void
         `💰 Spent: <b>${buyAmount} SOL</b>`,
         `💲 Entry: ${entryPrice}`,
         `🔗 TX: <code>${result.txHash}</code>`,
-        `💸 1% platform fee applied`,
         ``,
         `Manage your new position below 👇`,
       ].join("\n"),
@@ -600,8 +598,7 @@ async function executeSell(ctx: Context, ca: string, percent: number): Promise<v
 
     await ctx.reply(
       [`✅ <b>Sell Confirmed!</b>`, `🪙 ${tokenSymbol} [${user.activeChain}]`,
-       `📤 Sold: ${percent}% position`, `🔗 TX: <code>${txHash}</code>`,
-       `💸 1% platform fee applied`].join("\n"),
+       `📤 Sold: ${percent}% position`, `🔗 TX: <code>${txHash}</code>`].join("\n"),
       {
         parse_mode: "HTML",
         ...Markup.inlineKeyboard([
