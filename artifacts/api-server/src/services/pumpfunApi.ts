@@ -103,6 +103,32 @@ async function fetchOffchainJson(uri: string): Promise<{
   }
 }
 
+export interface OnchainSolToken {
+  mint: string;
+  name: string;
+  symbol: string;
+}
+
+/**
+ * Generic Solana metadata-only lookup — works for ANY SPL token with
+ * standard Metaplex metadata, not just pump.fun ones. Used as the final
+ * fallback when a token isn't on DexScreener, GeckoTerminal, or a pump.fun
+ * bonding curve (e.g. a token that migrated off pump.fun's curve already,
+ * or was never a pump.fun launch to begin with). No price/liquidity data —
+ * just confirms the token exists on-chain and shows its name/symbol.
+ */
+export async function getSolTokenOnchainMetadata(mint: string): Promise<OnchainSolToken | null> {
+  try {
+    const connection = getConnection();
+    const mintPubkey = new PublicKey(mint);
+    const meta = await fetchMetaplexMetadata(connection, mintPubkey);
+    if (!meta) return null;
+    return { mint, name: meta.name || "Unknown", symbol: meta.symbol || "?" };
+  } catch {
+    return null;
+  }
+}
+
 export async function getPumpFunToken(mint: string): Promise<PumpFunToken | null> {
   try {
     const connection = getConnection();
