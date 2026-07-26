@@ -226,9 +226,35 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
   });
 
   // Dynamic actions with parameters
-  bot.action(/^analyze:(.+)$/, async (ctx) => {
+    bot.action(/^analyze:(.+)$/, async (ctx) => {
     const ca = (ctx.match as RegExpMatchArray)[1] ?? "";
     await handleAnalyzeCallback(ctx, ca);
+  });
+
+  bot.action(/^rugcheck:(.+)$/, async (ctx) => {
+    const target = (ctx.match as RegExpMatchArray)[1] ?? "";
+    await handleRugCheckCallback(ctx, target);
+  });
+
+  bot.action("prompt_sell", async (ctx) => {
+    await ctx.reply(
+      [
+        `📤 <b>Sell a Token</b>`,
+        ``,
+        `Paste the contract address of a token you're holding and I'll`,
+        `pull it up with sell options.`,
+        ``,
+        `<b>Solana:</b> base58 address (e.g. <code>EPjFWdd5...</code>)`,
+        `<b>EVM:</b> 0x address (e.g. <code>0x6B175...</code>)`,
+      ].join("\n"),
+      {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("📉 My Trades", "my_trades")],
+          [Markup.button.callback("⬅️ Dashboard", "dashboard")],
+        ]),
+      }
+    );
   });
 
   bot.action(/^gen_wallet:(.+)$/, async (ctx) => {
