@@ -97,12 +97,17 @@ export async function renderDashboard(
     const adminRow = isAdmin(telegramId)
       ? [[Markup.button.callback("📊 Bot Stats", "bot_stats"), Markup.button.callback("❓ Help & Guide", "help_guide")]]
       : [[Markup.button.callback("❓ Help & Guide", "help_guide")]];
-
     const keyboard = Markup.inlineKeyboard([
+      [
+        Markup.button.callback("💰 Buy", "prompt_buy"),
+        Markup.button.callback("📤 Sell", "prompt_sell"),
+      ],
+      
       [
         Markup.button.callback("🔍 New Runners", "new_runners"),
         Markup.button.callback("🔥 Trending", "trending"),
       ],
+  
       [
         Markup.button.callback("🌱 PumpFun / Moonshot Snipe", "pumpfun"),
         Markup.button.callback("📋 Previous Signals", "prev_signals"),
