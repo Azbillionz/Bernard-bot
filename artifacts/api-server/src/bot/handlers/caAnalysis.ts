@@ -1,7 +1,18 @@
 /**
  * CA Analysis — triggered by text input or inline "analyze:" callback.
- * Waterfall: DexScreener → GeckoTerminal → PumpFun (SOL only)
- * Detects EVM (0x + 40 hex) or Solana (43–44 char base58) addresses.
+ *
+ * EVM chain is NEVER guessed from the user's active wallet — a 0x address
+ * looks identical on every EVM chain, so we resolve the real chain from
+ * whichever data source actually finds the token (DexScreener's chainId,
+ * GeckoTerminal's network, or on-chain bytecode presence), trying
+ * ETH/BASE/BSC in parallel. This means pasting any CA works regardless of
+ * which chain the user currently has selected.
+ *
+ * Waterfall (SOL):  DexScreener → GeckoTerminal → PumpFun bonding curve
+ *                    → generic on-chain metadata (any SPL token) → not found
+ * Waterfall (EVM):  DexScreener (all chains) → GeckoTerminal (ETH/BASE/BSC
+ *                    in parallel) → on-chain bytecode+ERC20 read (ETH/BASE/BSC
+ *                    in parallel) → not found
  *
  * Message format includes an auto-generated Score/Signal/Potential block
  * (see ../../services/tokenScore.ts) — a transparent formula built from
@@ -12,7 +23,12 @@ import type { Context } from "telegraf";
 import { Markup } from "telegraf";
 import { getPairsByToken, type TokenPair } from "../../services/dexscreener";
 import { searchGeckoToken, type GeckoPool } from "../../services/geckoTerminal";
-import { getPumpFunToken, type PumpFunToken } from "../../services/pumpfunApi";
+import {
+  getPumpFunToken,
+  getSolTokenOnchainMetadata,
+  type PumpFunToken,
+} from "../../services/pumpfunApi";
+import { resolveEvmTokenOnchain, type OnchainEvmToken } from "../../services/evmOnchain";
 import { getNativeTokenPrice } from "../../services/chainPrice";
 import { checkEvmToken, checkSolanaToken } from "../../services/goplus";
 import { scoreToken, formatScoreBlock, type ScoreInput } from "../../services/tokenScore";
@@ -23,6 +39,18 @@ import { eq } from "drizzle-orm";
 const EVM_RE = /^0x[a-fA-F0-9]{40}$/;
 // Base58 Solana: 32-44 chars to catch PumpFun mints too
 const SOL_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+// Different sources spell chain names differently — normalize to our codes.
+const DEXSCREENER_CHAIN_MAP: Record<string, "ETH" | "BASE" | "BSC"> = {
+  ethereum: "ETH",
+  base: "BASE",
+  bsc: "BSC",
+};
+const GECKO_CHAIN_MAP: Record<string, "ETH" | "BASE" | "BSC"> = {
+  eth: "ETH",
+  base: "BASE",
+  bsc: "BSC",
+};
 
 export function detectCAType(text: string): "EVM" | "SOL" | null {
   const trimmed = text.trim();
@@ -86,6 +114,19 @@ function fmtAge(ageMinutes?: number): string {
   if (ageMinutes < 1440) return `${(ageMinutes / 60).toFixed(1)} hr`;
   return `${(ageMinutes / 1440).toFixed(1)} d`;
 }
+
+const tradeButtonsFor = (ca: string) => [
+  [
+    Markup.button.callback("💰 Buy 0.1", `buy:${ca}:0.1`),
+    Markup.button.callback("💰 Buy 0.5", `buy:${ca}:0.5`),
+    Markup.button.callback("💰 Buy Custom", `buy_custom:${ca}`),
+  ],
+  [
+    Markup.button.callback("📤 Sell 50%", `sell:${ca}:50`),
+    Markup.button.callback("📤 Sell 100%", `sell:${ca}:100`),
+  ],
+  [Markup.button.callback("⬅️ Dashboard", "dashboard")],
+];
 
 /** Build the full scored card for a DexScreener pair. */
 function buildDexScreenerCard(pair: TokenPair, securityLines: string[], securityRisks: number): string {
@@ -188,8 +229,6 @@ function buildPumpFunCard(
     volume24hUsd: 0, // not available from on-chain bonding-curve state alone
     marketCapUsd,
     securityRisks,
-    // buys/sells/age/momentum unavailable pre-graduation without an indexer —
-    // scoring degrades gracefully (treated as neutral/unknown) rather than guessed
   };
   const result = scoreToken(input);
 
@@ -211,6 +250,26 @@ function buildPumpFunCard(
   ].join("\n");
 }
 
+/** Minimal card for tokens found only via raw on-chain lookup (no indexer coverage yet). */
+function buildOnchainOnlyCard(
+  chainLabel: string,
+  name: string,
+  symbol: string,
+  ca: string,
+  securityLines: string[]
+): string {
+  return [
+    `🚀 <b>${name}</b> (<code>${symbol}</code>) — ${chainLabel}`,
+    `<i>⛓️ Source: on-chain only — not yet indexed by any market data provider</i>`,
+    `—`,
+    `⚠️ No price/liquidity data available yet. This token may be too new, or may not have an active trading pool.`,
+    `—`,
+    `📍 CA: <code>${ca}</code>`,
+    `—`,
+    ...securityLines,
+  ].join("\n");
+}
+
 export async function handleCAAnalysis(ctx: Context, ca: string): Promise<void> {
   const caType = detectCAType(ca);
   if (!caType) return;
@@ -220,92 +279,55 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<void> 
 
   await ctx.reply(`🔍 Analyzing <code>${ca}</code>…`, { parse_mode: "HTML" });
 
-  const [user] = await Promise.all([
-    db.query.usersTable.findFirst({ where: eq(usersTable.telegramId, telegramId) }),
-  ]);
-  const chain = user?.activeChain ?? "SOL";
+  const user = await db.query.usersTable.findFirst({ where: eq(usersTable.telegramId, telegramId) });
 
-  // ── Parallel: DexScreener + GoPlus ───────────────────────────────────────
-  const [pairs, security] = await Promise.all([
-    getPairsByToken(ca),
-    caType === "EVM" ? checkEvmToken(chain, ca) : checkSolanaToken(ca),
-  ]);
+  const tradeButtons = tradeButtonsFor(ca);
 
-  const pair = pairs[0];
-  const securityRisks = countSecurityRisks(caType, security);
-  const securityLines = securityLinesFor(caType, security);
-
-  const tradeButtons = [
-    [
-      Markup.button.callback("💰 Buy 0.1", `buy:${ca}:0.1`),
-      Markup.button.callback("💰 Buy 0.5", `buy:${ca}:0.5`),
-      Markup.button.callback("💰 Buy Custom", `buy_custom:${ca}`),
-    ],
-    [
-      Markup.button.callback("📤 Sell 50%", `sell:${ca}:50`),
-      Markup.button.callback("📤 Sell 100%", `sell:${ca}:100`),
-    ],
-    [Markup.button.callback("⬅️ Dashboard", "dashboard")],
-  ];
-
-  // ── 1. DexScreener hit ───────────────────────────────────────────────────
-  if (pair) {
-    const fullText = buildDexScreenerCard(pair, securityLines, securityRisks);
-
-    if (user) {
-      void db.insert(signalsTable).values({
-        userId: user.id,
-        tokenAddress: ca,
-        tokenSymbol: pair.baseToken.symbol,
-        chain: caType === "SOL" ? "SOL" : chain,
-        source: "MANUAL",
-        priceUsd: pair.priceUsd ?? "0",
-      });
-    }
-
-    await ctx.reply(fullText, { parse_mode: "HTML", ...Markup.inlineKeyboard(tradeButtons) });
-    return;
-  }
-
-  // ── 2. GeckoTerminal fallback ────────────────────────────────────────────
-  const geckoPool = await searchGeckoToken(ca, chain);
-  if (geckoPool) {
-    const fullText = buildGeckoCard(geckoPool, securityLines, securityRisks);
-
-    if (user) {
-      void db.insert(signalsTable).values({
-        userId: user.id,
-        tokenAddress: ca,
-        tokenSymbol: geckoPool.baseTokenSymbol,
-        chain: caType === "SOL" ? "SOL" : chain,
-        source: "MANUAL",
-        priceUsd: geckoPool.priceUsd,
-      });
-    }
-
-    await ctx.reply(fullText, { parse_mode: "HTML", ...Markup.inlineKeyboard(tradeButtons) });
-    return;
-  }
-
-  // ── 3. PumpFun fallback (SOL only) ───────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════════
+  // SOLANA
+  // ═══════════════════════════════════════════════════════════════════════
   if (caType === "SOL") {
+    const [pairs, security] = await Promise.all([getPairsByToken(ca), checkSolanaToken(ca)]);
+    const pair = pairs[0];
+    const securityRisks = countSecurityRisks("SOL", security);
+    const securityLines = securityLinesFor("SOL", security);
+
+    if (pair) {
+      const fullText = buildDexScreenerCard(pair, securityLines, securityRisks);
+      if (user) {
+        void db.insert(signalsTable).values({
+          userId: user.id, tokenAddress: ca, tokenSymbol: pair.baseToken.symbol,
+          chain: "SOL", source: "MANUAL", priceUsd: pair.priceUsd ?? "0",
+        });
+      }
+      await ctx.reply(fullText, { parse_mode: "HTML", ...Markup.inlineKeyboard(tradeButtons) });
+      return;
+    }
+
+    const geckoPool = await searchGeckoToken(ca, "SOL");
+    if (geckoPool) {
+      const fullText = buildGeckoCard(geckoPool, securityLines, securityRisks);
+      if (user) {
+        void db.insert(signalsTable).values({
+          userId: user.id, tokenAddress: ca, tokenSymbol: geckoPool.baseTokenSymbol,
+          chain: "SOL", source: "MANUAL", priceUsd: geckoPool.priceUsd,
+        });
+      }
+      await ctx.reply(fullText, { parse_mode: "HTML", ...Markup.inlineKeyboard(tradeButtons) });
+      return;
+    }
+
     const pumpToken = await getPumpFunToken(ca);
     if (pumpToken) {
       const solPrice = Number(await getNativeTokenPrice("SOL").catch(() => 0));
       const fullText = buildPumpFunCard(pumpToken, solPrice, securityLines, securityRisks);
-
       if (user) {
         const priceUsd = (pumpToken.priceNative * solPrice).toFixed(10);
         void db.insert(signalsTable).values({
-          userId: user.id,
-          tokenAddress: ca,
-          tokenSymbol: pumpToken.symbol,
-          chain: "SOL",
-          source: "PUMPFUN",
-          priceUsd,
+          userId: user.id, tokenAddress: ca, tokenSymbol: pumpToken.symbol,
+          chain: "SOL", source: "PUMPFUN", priceUsd,
         });
       }
-
       await ctx.reply(fullText, {
         parse_mode: "HTML",
         link_preview_options: { is_disabled: true },
@@ -313,21 +335,92 @@ export async function handleCAAnalysis(ctx: Context, ca: string): Promise<void> 
       });
       return;
     }
+
+    const onchain = await getSolTokenOnchainMetadata(ca);
+    if (onchain) {
+      const fullText = buildOnchainOnlyCard("Solana", onchain.name, onchain.symbol, ca, securityLines);
+      await ctx.reply(fullText, { parse_mode: "HTML", ...Markup.inlineKeyboard(tradeButtons) });
+      return;
+    }
+
+    await ctx.reply(
+      [
+        `❓ <b>Token not found</b>`,
+        `CA: <code>${ca}</code>`,
+        ``,
+        `Checked: DexScreener, GeckoTerminal, PumpFun, on-chain metadata.`,
+        `This mint doesn't appear to exist, or isn't a token account.`,
+      ].join("\n"),
+      { parse_mode: "HTML", ...Markup.inlineKeyboard([[Markup.button.callback("⬅️ Dashboard", "dashboard")]]) }
+    );
+    return;
   }
 
-  // ── 4. Not found anywhere ────────────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════════
+  // EVM — chain resolved from whichever source finds the token, never
+  // guessed from the user's currently-active wallet.
+  // ═══════════════════════════════════════════════════════════════════════
+  const pairs = await getPairsByToken(ca); // DexScreener is chain-agnostic by address
+  const evmPair = pairs.find((p) => DEXSCREENER_CHAIN_MAP[p.chainId]);
+
+  if (evmPair) {
+    const resolvedChain = DEXSCREENER_CHAIN_MAP[evmPair.chainId]!;
+    const security = await checkEvmToken(resolvedChain, ca);
+    const securityRisks = countSecurityRisks("EVM", security);
+    const securityLines = securityLinesFor("EVM", security);
+    const fullText = buildDexScreenerCard(evmPair, securityLines, securityRisks);
+
+    if (user) {
+      void db.insert(signalsTable).values({
+        userId: user.id, tokenAddress: ca, tokenSymbol: evmPair.baseToken.symbol,
+        chain: resolvedChain, source: "MANUAL", priceUsd: evmPair.priceUsd ?? "0",
+      });
+    }
+    await ctx.reply(fullText, { parse_mode: "HTML", ...Markup.inlineKeyboard(tradeButtons) });
+    return;
+  }
+
+  // Try GeckoTerminal across all 3 EVM chains in parallel
+  const geckoResults = await Promise.all(
+    (["ETH", "BASE", "BSC"] as const).map((c) => searchGeckoToken(ca, c))
+  );
+  const geckoHit = geckoResults.find((r) => r !== null);
+  if (geckoHit) {
+    const resolvedChain = GECKO_CHAIN_MAP[geckoHit.network] ?? "ETH";
+    const security = await checkEvmToken(resolvedChain, ca);
+    const securityRisks = countSecurityRisks("EVM", security);
+    const securityLines = securityLinesFor("EVM", security);
+    const fullText = buildGeckoCard(geckoHit, securityLines, securityRisks);
+
+    if (user) {
+      void db.insert(signalsTable).values({
+        userId: user.id, tokenAddress: ca, tokenSymbol: geckoHit.baseTokenSymbol,
+        chain: resolvedChain, source: "MANUAL", priceUsd: geckoHit.priceUsd,
+      });
+    }
+    await ctx.reply(fullText, { parse_mode: "HTML", ...Markup.inlineKeyboard(tradeButtons) });
+    return;
+  }
+
+  // Last resort: raw on-chain bytecode + ERC20 metadata across ETH/BASE/BSC
+  const onchainEvm: OnchainEvmToken | null = await resolveEvmTokenOnchain(ca);
+  if (onchainEvm) {
+    const security = await checkEvmToken(onchainEvm.chain, ca);
+    const securityLines = securityLinesFor("EVM", security);
+    const fullText = buildOnchainOnlyCard(onchainEvm.chain, onchainEvm.name, onchainEvm.symbol, ca, securityLines);
+    await ctx.reply(fullText, { parse_mode: "HTML", ...Markup.inlineKeyboard(tradeButtons) });
+    return;
+  }
+
   await ctx.reply(
     [
       `❓ <b>Token not found</b>`,
       `CA: <code>${ca}</code>`,
       ``,
-      `Checked: DexScreener, GeckoTerminal${caType === "SOL" ? ", PumpFun" : ""}.`,
-      `The token may be brand new or not yet indexed — try again in a few seconds.`,
+      `Checked: DexScreener, GeckoTerminal, and on-chain (ETH/BASE/BSC).`,
+      `This address doesn't appear to be a deployed contract on any supported chain.`,
     ].join("\n"),
-    {
-      parse_mode: "HTML",
-      ...Markup.inlineKeyboard([[Markup.button.callback("⬅️ Dashboard", "dashboard")]]),
-    }
+    { parse_mode: "HTML", ...Markup.inlineKeyboard([[Markup.button.callback("⬅️ Dashboard", "dashboard")]]) }
   );
 }
 
