@@ -18,6 +18,7 @@ import {
   walletsTable,
   tradesTable,
   sniperConfigsTable,
+  activeSnipesTable,
 } from "@workspace/db";
 import { eq, and, desc } from "drizzle-orm";
 import { decrypt } from "../../lib/encryption";
