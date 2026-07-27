@@ -122,8 +122,7 @@ function fmtAge(ageMinutes?: number): string {
 
 interface ExtraButtonsOpts {
   chartUrl?: string;
-  /** Encoded as "SOL::<ca>" or "EVM:<CHAIN>:<ca>" — used by both the
-   *  rugcheck: and snipe_confirm: callbacks (same resolved-chain target). */
+  /** Encoded as "SOL::<ca>" or "EVM:<CHAIN>:<ca>" — used by both rugcheck: and snipe_confirm: callbacks. */
   rugcheckTarget?: string;
 }
 
