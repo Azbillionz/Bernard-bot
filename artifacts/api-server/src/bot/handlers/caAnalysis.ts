@@ -119,7 +119,8 @@ function fmtAge(ageMinutes?: number): string {
   if (ageMinutes < 1440) return `${(ageMinutes / 60).toFixed(1)} hr`;
   return `${(ageMinutes / 1440).toFixed(1)} d`;
 }
-
 interface ExtraButtonsOpts {
   chartUrl?: string;
-  /** Encoded as "SOL::<ca>" or "EVM:<CHAIN>:
+  /** Encoded as "SOL::<ca>" or "EVM:<CHAIN>:<ca>" — used by both rugcheck: and snipe_confirm: callbacks. */
+  rugcheckTarget?: string;
+}
