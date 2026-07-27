@@ -63,7 +63,10 @@ if (botToken) {
   bot = createBot(redis);
   setBotInstance(bot);
   await launchBot(bot);
+  const { startSnipeMonitor } = await import("./services/snipeMonitor");
+  startSnipeMonitor();
 } else {
+
   logger.warn("TELEGRAM_BOT_TOKEN not set — bot not started. Set it in Secrets.");
 }
 
