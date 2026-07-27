@@ -4,3 +4,4 @@ export * from "./trades";
 export * from "./sniperConfigs";
 export * from "./signals";
 export * from "./copyTrades";
+export * from "./activeSnipes";
