@@ -587,10 +587,17 @@ async function executeSell(ctx: Context, ca: string, percent: number): Promise<v
       txHash = await sendJitoBundle([signedBase64]);
       if (!txHash) throw new Error("Jito bundle rejected");
 
-      const solOut = parseFloat(quote.outAmount) / 1e9;
+            const solOut = parseFloat(quote.outAmount) / 1e9;
       await db.update(tradesTable)
         .set({ status: "CONFIRMED", txHash, amountOut: String(solOut) })
         .where(eq(tradesTable.id, trade!.id));
+
+      if (percent === 100) {
+        await db
+          .update(activeSnipesTable)
+          .set({ active: false })
+          .where(and(eq(activeSnipesTable.userId, user.id), eq(activeSnipesTable.tokenAddress, ca)));
+      }
     } else {
       await ctx.reply("⚠️ EVM sell: use a DEX frontend (Uniswap/PancakeSwap) until native EVM sell is available.");
       await db.update(tradesTable).set({ status: "FAILED" }).where(eq(tradesTable.id, trade!.id));
