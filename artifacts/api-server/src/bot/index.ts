@@ -47,7 +47,13 @@ import {
   processFilterInput,
   getPendingFilter,
 } from "./handlers/filters";
+import {
+  handleManualSnipePrompt,
+  processManualSnipeCA,
+  isPendingManualSnipe,
+} from "./handlers/manualSnipe";
 import { handleBotStats } from "./handlers/botStats";
+
 import { handleHelpGuide } from "./handlers/helpGuide";
 import {
     handleCAAnalysis,
