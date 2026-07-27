@@ -1,26 +1,39 @@
 /**
- * Manual Snipe — the user-driven counterpart to Auto-Snipe. Instead of
- * the bot buying automatically off the PumpFun listener, the user pastes
- * a CA for whatever chain they currently have active, the bot checks it
- * against their configured filters (same sniperConfigsTable used by
- * Auto-Snipe: liquidity, market cap range, age range, buy ratio, tax),
- * and shows a pass/fail summary followed by the full analysis card
- * (which already has Buy/Sell/Track PnL/Chart/RugCheck buttons).
+ * Manual Snipe — user-driven counterpart to Auto-Snipe.
  *
- * "Notifications about the snipe" and "refresh to see progress" are the
- * existing Buy Confirmed message + the 📊 Track PnL button — no separate
- * mechanism needed since those already work for any buy, manual or auto.
+ * Flow: tap 🎯 Manual Snipe → paste CA (must match active chain) → bot runs
+ * filter checks + RugCheck and shows a REVIEW-ONLY card (no Buy/Sell buttons
+ * — this is a review step, not a trade screen). If it's risky or fails
+ * filters, a warning is shown but the user can still tap "🎯 Start Manual
+ * Snipe" to proceed anyway. Starting checks the wallet balance: insufficient
+ * funds → told to fund the wallet; sufficient → buys immediately via the
+ * same executeBuy path as a normal buy, then registers the position for
+ * recurring ~20-minute progress notifications (services/snipeMonitor.ts),
+ * on top of the existing 🔄 Refresh / 📊 Track PnL button for on-demand checks.
+ *
+ * "🎯 Snipe" (from a CA analysis card, New Runners, or Trending) is a
+ * separate faster path: skips the filter-check review and goes straight to
+ * a CONFIRM SNIPE screen showing computed TP/SL price targets.
  */
 
 import type { Context } from "telegraf";
+import { Markup } from "telegraf";
 import { db } from "@workspace/db";
-import { usersTable, sniperConfigsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { usersTable, sniperConfigsTable, tradesTable, activeSnipesTable } from "@workspace/db";
+import { eq, and, desc, gt } from "drizzle-orm";
 import { getPairsByToken } from "../../services/dexscreener";
 import { searchGeckoToken } from "../../services/geckoTerminal";
 import { getPumpFunToken } from "../../services/pumpfunApi";
 import { getNativeTokenPrice } from "../../services/chainPrice";
-import { handleCAAnalysis, detectCAType } from "./caAnalysis";
+import { checkEvmToken, checkSolanaToken } from "../../services/goplus";
+import { stopSnipeTracking } from "../../services/snipeMonitor";
+import { scoreToken, type ScoreInput } from "../../services/tokenScore";
+import {
+  detectCAType,
+  countSecurityRisks,
+  securityLinesFor,
+} from "./caAnalysis";
+import { handleBuy } from "./trade";
 import { registerPendingClearer } from "../../lib/pendingFlows";
 
 const pendingManualSnipe = new Set<number>();
@@ -43,8 +56,8 @@ export async function handleManualSnipePrompt(ctx: Context): Promise<void> {
       `🎯 <b>Manual Snipe</b> — active chain: <b>${user.activeChain}</b>`,
       ``,
       `Paste the contract address of a token on <b>${user.activeChain}</b>.`,
-      `I'll check it against your ⚗️ Snipe Filters, then show the full`,
-      `analysis so you can RugCheck, review, and buy if it looks good.`,
+      `I'll RugCheck it and check it against your ⚗️ Snipe Filters, then`,
+      `show a review — you decide whether to start the snipe.`,
       ``,
       `Trading a different chain? Switch it first in 💼 Wallet Manager.`,
     ].join("\n"),
@@ -61,6 +74,9 @@ const DEX_CHAIN_ID: Record<string, string> = {
 
 interface QuickMetrics {
   found: boolean;
+  tokenName: string;
+  tokenSymbol: string;
+  priceUsd: number;
   liquidityUsd: number;
   marketCapUsd: number;
   ageMinutes?: number;
@@ -77,6 +93,9 @@ async function fetchQuickMetrics(ca: string, chain: string): Promise<QuickMetric
     const sells = pair.txns?.h24?.sells ?? 0;
     return {
       found: true,
+      tokenName: pair.baseToken.name,
+      tokenSymbol: pair.baseToken.symbol,
+      priceUsd: Number(pair.priceUsd ?? 0),
       liquidityUsd: pair.liquidity?.usd ?? 0,
       marketCapUsd: pair.marketCap ?? pair.fdv ?? 0,
       ageMinutes: pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 60_000 : undefined,
@@ -90,6 +109,9 @@ async function fetchQuickMetrics(ca: string, chain: string): Promise<QuickMetric
     const sells = geckoPool.sells24h ?? 0;
     return {
       found: true,
+      tokenName: geckoPool.baseTokenName,
+      tokenSymbol: geckoPool.baseTokenSymbol,
+      priceUsd: Number(geckoPool.priceUsd ?? 0),
       liquidityUsd: geckoPool.liquidityUsd ?? 0,
       marketCapUsd: geckoPool.marketCapUsd ?? geckoPool.fdvUsd ?? 0,
       ageMinutes: geckoPool.poolCreatedAt ? (Date.now() - geckoPool.poolCreatedAt) / 60_000 : undefined,
@@ -104,13 +126,22 @@ async function fetchQuickMetrics(ca: string, chain: string): Promise<QuickMetric
       const priceUsd = pumpToken.priceNative * solPrice;
       return {
         found: true,
+        tokenName: pumpToken.name,
+        tokenSymbol: pumpToken.symbol,
+        priceUsd,
         liquidityUsd: (pumpToken.virtualSolReserves / 1e9) * solPrice * 2,
         marketCapUsd: priceUsd * pumpToken.totalSupply,
       };
     }
   }
 
-  return { found: false, liquidityUsd: 0, marketCapUsd: 0 };
+  return { found: false, tokenName: "Unknown", tokenSymbol: "?", priceUsd: 0, liquidityUsd: 0, marketCapUsd: 0 };
+}
+
+function fmtUsd(n: number): string {
+  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `$${(n / 1_000).toFixed(1)}K`;
+  return `$${n.toFixed(0)}`;
 }
 
 export async function processManualSnipeCA(ctx: Context, ca: string): Promise<void> {
@@ -143,16 +174,24 @@ export async function processManualSnipeCA(ctx: Context, ca: string): Promise<vo
     return;
   }
 
-  const config = await db.query.sniperConfigsTable.findFirst({ where: eq(sniperConfigsTable.userId, user.id) });
-  const metrics = await fetchQuickMetrics(ca, user.activeChain);
+  await ctx.reply(`🔍 Checking <code>${ca}</code>…`, { parse_mode: "HTML" });
+
+  const [config, metrics, security] = await Promise.all([
+    db.query.sniperConfigsTable.findFirst({ where: eq(sniperConfigsTable.userId, user.id) }),
+    fetchQuickMetrics(ca, user.activeChain),
+    isEvmCa ? checkEvmToken(user.activeChain, ca) : checkSolanaToken(ca),
+  ]);
 
   if (!metrics.found) {
     await ctx.reply(
-      "❓ Couldn't find market data for this token yet — it may be too new. Try again in a moment, or paste it again to run a full on-chain analysis.",
+      "❓ Couldn't find market data for this token yet — it may be too new. Try again in a moment.",
       { parse_mode: "HTML" }
     );
     return;
   }
+
+  const securityRisks = countSecurityRisks(isEvmCa ? "EVM" : "SOL", security);
+  const securityLines = securityLinesFor(isEvmCa ? "EVM" : "SOL", security);
 
   const checks: { label: string; pass: boolean }[] = [];
   const minLiq = parseFloat(config?.minLiquidityUsd ?? "0");
@@ -179,23 +218,192 @@ export async function processManualSnipeCA(ctx: Context, ca: string): Promise<vo
     checks.push({ label: `Buy ratio ≥ ${minBuyRatio}%`, pass: metrics.buyRatioPercent >= minBuyRatio });
   }
 
-  const allPass = checks.every((c) => c.pass);
+  const filtersPass = checks.every((c) => c.pass);
+  const overallOk = filtersPass && securityRisks === 0;
+
   const verdictLines = checks.length
     ? checks.map((c) => `  ${c.pass ? "✅" : "❌"} ${c.label}`)
-    : [`  ℹ️ No filters configured in ⚗️ Snipe Filters — nothing to check.`];
+    : [`  ℹ️ No filters configured in ⚗️ Snipe Filters.`];
+
+  const lines = [
+    `🎯 <b>Manual Snipe Review</b>`,
+    `🪙 <b>${metrics.tokenName}</b> (<code>${metrics.tokenSymbol}</code>) — ${user.activeChain}`,
+    `📍 CA: <code>${ca}</code>`,
+    `—`,
+    `💲 Price: <b>$${metrics.priceUsd.toFixed(8)}</b>`,
+    `🏦 MCap: ${fmtUsd(metrics.marketCapUsd)}  |  💧 Liq: ${fmtUsd(metrics.liquidityUsd)}`,
+    `—`,
+    `<b>Your Filters:</b>`,
+    ...verdictLines,
+    `—`,
+    ...securityLines,
+    `—`,
+  ];
+
+  if (!overallOk) {
+    lines.push(
+      `⚠️ <b>Warning:</b> ${!filtersPass ? "this token doesn't meet your filter criteria" : ""}${
+        !filtersPass && securityRisks > 0 ? " and " : ""
+      }${securityRisks > 0 ? "has security risk flags" : ""}.`,
+      `Proceed only if you understand the risk.`
+    );
+  } else {
+    lines.push(`✅ Passes your filters with no security flags.`);
+  }
+
+  await ctx.reply(lines.join("\n"), {
+    parse_mode: "HTML",
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback(overallOk ? "🎯 Start Manual Snipe" : "⚠️ Start Anyway", `manual_snipe_start:${ca}`)],
+      [Markup.button.callback("⬅️ Cancel", "dashboard")],
+    ]),
+  });
+}
+
+/**
+ * "🎯 Start Manual Snipe" — reuses the exact same buy path as a normal
+ * manual buy (handleBuy already checks/reports insufficient balance), then
+ * registers the position for periodic 20-minute updates if the buy actually
+ * confirmed.
+ */
+export async function handleStartManualSnipe(ctx: Context, ca: string): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  const user = await db.query.usersTable.findFirst({ where: eq(usersTable.telegramId, telegramId) });
+  if (!user) return;
+
+  const config = await db.query.sniperConfigsTable.findFirst({ where: eq(sniperConfigsTable.userId, user.id) });
+  const buyAmount = config?.autoBuyAmountNative ?? "0.1";
+
+  const before = new Date();
+  await handleBuy(ctx, ca, buyAmount); // already tells the user to fund the wallet if balance is insufficient
+
+  // Confirm whether the buy actually went through before starting tracking
+  const confirmedTrade = await db.query.tradesTable.findFirst({
+    where: and(
+      eq(tradesTable.userId, user.id),
+      eq(tradesTable.tokenAddress, ca),
+      eq(tradesTable.side, "BUY"),
+      eq(tradesTable.status, "CONFIRMED"),
+      gt(tradesTable.createdAt, before)
+    ),
+    orderBy: [desc(tradesTable.createdAt)],
+  });
+
+  if (!confirmedTrade) return; // insufficient balance or buy failed — handleBuy already told the user
+
+  await db.insert(activeSnipesTable).values({
+    userId: user.id,
+    telegramId,
+    chain: user.activeChain,
+    tokenAddress: ca,
+    tokenSymbol: confirmedTrade.tokenSymbol,
+    tokenName: confirmedTrade.tokenName,
+    entryPriceUsd: confirmedTrade.priceUsd,
+  });
+
+  await ctx.reply(
+    `🎯 <b>Manual Snipe active</b> — you'll get a progress update roughly every 20 minutes. Use 🔄 Refresh anytime for a live check.`,
+    { parse_mode: "HTML" }
+  );
+}
+
+export async function handleStopSnipe(ctx: Context, snipeIdStr: string): Promise<void> {
+  const snipeId = parseInt(snipeIdStr, 10);
+  if (!Number.isFinite(snipeId)) return;
+  await stopSnipeTracking(snipeId);
+  await ctx.reply("⏹ Stopped periodic updates for this position. Your tokens are untouched — sell anytime from 📊 Track PnL.");
+}
+
+/**
+ * "🎯 Snipe" preview — reachable from a CA analysis card, New Runners, or
+ * Trending. Unlike the Buy buttons (which buy immediately), this shows a
+ * CONFIRM SNIPE screen first: score/signal, computed TP/SL price targets
+ * (from tokenScore.ts's exitPlan), and the configured buy amount — so the
+ * user sees exactly what they're agreeing to before anything executes.
+ * Confirm re-uses the same manual_snipe_start:<ca> flow as Manual Snipe
+ * (balance check, buy, then registers 20-min progress tracking).
+ */
+export async function handleSnipeConfirmPreview(ctx: Context, target: string): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  const parts = target.split(":");
+  const type = parts[0] as "SOL" | "EVM";
+  const chain = type === "SOL" ? "SOL" : parts[1] ?? "ETH";
+  const ca = parts.slice(2).join(":");
+  if (!ca) return;
+
+  const user = await db.query.usersTable.findFirst({ where: eq(usersTable.telegramId, telegramId) });
+  if (!user) { await ctx.reply("❌ Send /start first."); return; }
+
+  await ctx.reply("🎯 Preparing snipe preview…");
+
+  const [config, metrics, security] = await Promise.all([
+    db.query.sniperConfigsTable.findFirst({ where: eq(sniperConfigsTable.userId, user.id) }),
+    fetchQuickMetrics(ca, chain),
+    type === "SOL" ? checkSolanaToken(ca) : checkEvmToken(chain, ca),
+  ]);
+
+  if (!metrics.found) {
+    await ctx.reply("❓ No live market data for this token right now — try 🔍 Analyze instead.");
+    return;
+  }
+
+  const securityRisks = countSecurityRisks(type === "SOL" ? "SOL" : "EVM", security);
+  const scoreInput: ScoreInput = {
+    liquidityUsd: metrics.liquidityUsd,
+    volume24hUsd: 0, // not fetched in this quick preview — score is a rough guide here, not the full analysis
+    marketCapUsd: metrics.marketCapUsd,
+    buys24h: undefined,
+    sells24h: undefined,
+    ageMinutes: metrics.ageMinutes,
+    securityRisks,
+  };
+  const scoreResult = scoreToken(scoreInput);
+
+  const buyAmountNative = parseFloat(config?.autoBuyAmountNative ?? "0.1");
+  const nativePrice = Number(await getNativeTokenPrice(chain).catch(() => 0));
+  const buyAmountUsd = buyAmountNative * nativePrice;
+
+  const tpPrice = metrics.priceUsd * (1 + scoreResult.exitPlan.tp1 / 100);
+  const slPrice = metrics.priceUsd * (1 + scoreResult.exitPlan.sl / 100); // sl is already negative
+
+  const signalEmoji = scoreResult.signal === "BUY" ? "🟢" : scoreResult.signal === "WATCH" ? "🟡" : "🔴";
+  const warning =
+    scoreResult.score < 50 || securityRisks > 0
+      ? `⚠️ ${securityRisks > 0 ? "Security risk flags found" : "Score below 50"} — consider waiting or skipping.`
+      : null;
 
   await ctx.reply(
     [
-      `🎯 <b>Manual Snipe Check</b>`,
-      `📍 CA: <code>${ca}</code>`,
-      `—`,
-      allPass ? `✅ <b>Passes your filters</b>` : `⚠️ <b>Does not meet your filters</b>`,
-      ...verdictLines,
-      `—`,
-      `Full analysis below 👇`,
+      `🎯 <b>CONFIRM SNIPE</b>`,
+      ``,
+      `Token: <b>${metrics.tokenName}</b> (<code>${metrics.tokenSymbol}</code>)`,
+      `Score: <b>${scoreResult.score}/100</b> | ${signalEmoji} ${scoreResult.signal}`,
+      ``,
+      `📌 Price: $${metrics.priceUsd.toFixed(8)}`,
+      `🏦 MCap: ${fmtUsd(metrics.marketCapUsd)}`,
+      ...(warning ? [``, warning] : []),
+      ``,
+      `<b>Trade Details</b>`,
+      `💰 In: <b>${buyAmountNative} ${chain}</b> (~$${buyAmountUsd.toFixed(2)})`,
+      `🎯 TP: $${tpPrice.toFixed(8)} (+${scoreResult.exitPlan.tp1}%)`,
+      `🛑 SL: $${slPrice.toFixed(8)} (${scoreResult.exitPlan.sl}%)`,
+      `⏱ Suggested max hold: 120 min <i>(shown for reference — not auto-enforced; sell manually via 📊 Track PnL)</i>`,
+      ``,
+      `Change buy amount in ⚙️ Snipe Filters → Buy Amount.`,
     ].join("\n"),
-    { parse_mode: "HTML" }
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([
+        [
+          Markup.button.callback("✅ Confirm Snipe", `manual_snipe_start:${ca}`),
+          Markup.button.callback("❌ Cancel", "dashboard"),
+        ],
+        [Markup.button.callback("⚗️ Snipe Filters", "filters")],
+      ]),
+    }
   );
-
-  await handleCAAnalysis(ctx, ca);
 }
