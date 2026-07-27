@@ -75,6 +75,49 @@ export async function processFilterInput(ctx: Context, input: string): Promise<v
       }
       break;
     }
+    case "min_mc": {
+      if (!Number.isFinite(num) || num < 0) {
+        error = "Send a number ≥ 0, e.g. <b>10000</b> for $10,000. Send <b>0</b> to disable this filter.";
+      } else {
+        updates.minMarketCapUsd = String(Math.round(num));
+      }
+      break;
+    }
+    case "max_mc": {
+      if (!Number.isFinite(num) || num < 0) {
+        error = "Send a number ≥ 0, e.g. <b>5000000</b> for $5M. Send <b>0</b> for no maximum.";
+      } else {
+        updates.maxMarketCapUsd = String(Math.round(num));
+      }
+      break;
+    }
+    case "min_age": {
+      const mins = parseInt(value, 10);
+      if (!Number.isFinite(mins) || mins < 0) {
+        error = "Send whole minutes ≥ 0, e.g. <b>5</b>. Send <b>0</b> to disable this filter.";
+      } else {
+        updates.minAgeMinutes = mins;
+      }
+      break;
+    }
+    case "max_age": {
+      const mins = parseInt(value, 10);
+      if (!Number.isFinite(mins) || mins < 0) {
+        error = "Send whole minutes ≥ 0, e.g. <b>1440</b> for 1 day. Send <b>0</b> for no maximum.";
+      } else {
+        updates.maxAgeMinutes = mins;
+      }
+      break;
+    }
+    case "min_buy_ratio": {
+      const pct = parseInt(value, 10);
+      if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+        error = "Send a whole percent 0-100, e.g. <b>55</b> for 55% buys. Send <b>0</b> to disable this filter.";
+      } else {
+        updates.minBuyRatioPercent = pct;
+      }
+      break;
+    }
   }
 
   if (error) {
@@ -117,19 +160,32 @@ export async function handleFilters(ctx: Context): Promise<void> {
   if (!config) return;
 
   const honeypotIcon = config.honeypotCheck ? "🟢" : "🔴";
+  const mcRange =
+    config.minMarketCapUsd !== "0" || config.maxMarketCapUsd !== "0"
+      ? `$${config.minMarketCapUsd === "0" ? "0" : config.minMarketCapUsd} – ${config.maxMarketCapUsd === "0" ? "∞" : `$${config.maxMarketCapUsd}`}`
+      : "Any (disabled)";
+  const ageRange =
+    config.minAgeMinutes > 0 || config.maxAgeMinutes > 0
+      ? `${config.minAgeMinutes}m – ${config.maxAgeMinutes > 0 ? `${config.maxAgeMinutes}m` : "∞"}`
+      : "Any (disabled)";
+  const buyRatio = config.minBuyRatioPercent > 0 ? `≥${config.minBuyRatioPercent}% buys` : "Any (disabled)";
 
   await safeReply(
     ctx,
     [
-      `⚗️ <b>Auto-Snipe Filters</b>`,
+      `⚗️ <b>Snipe Filters</b>`,
+      `—`,
+      `Used by both 🤖 Auto-Snipe and 🎯 Manual Snipe checks.`,
       `—`,
       `💧 Min Liquidity: <b>$${config.minLiquidityUsd}</b>`,
+      `🏦 Market Cap Range: <b>${mcRange}</b>`,
+      `⏱ Age Range: <b>${ageRange}</b>`,
+      `🔄 Min Buy Ratio: <b>${buyRatio}</b>`,
       `💸 Max Tax: <b>${config.maxTaxPercent}%</b>`,
       `${honeypotIcon} Honeypot Check: <b>${config.honeypotCheck ? "ON" : "OFF"}</b>`,
       `🛒 Auto-Buy Amount: <b>${config.autoBuyAmountNative} native token</b>`,
       `📉 Slippage: <b>${(config.slippageBps / 100).toFixed(1)}%</b>`,
       `—`,
-      `These filters apply to every auto-snipe execution.`,
       `Tap a setting below to update it.`,
     ].join("\n"),
     {
@@ -140,6 +196,15 @@ export async function handleFilters(ctx: Context): Promise<void> {
           Markup.button.callback("💸 Max Tax", "set_filter:max_tax"),
         ],
         [
+          Markup.button.callback("🏦 Min MCap", "set_filter:min_mc"),
+          Markup.button.callback("🏦 Max MCap", "set_filter:max_mc"),
+        ],
+        [
+          Markup.button.callback("⏱ Min Age", "set_filter:min_age"),
+          Markup.button.callback("⏱ Max Age", "set_filter:max_age"),
+        ],
+        [Markup.button.callback("🔄 Min Buy Ratio %", "set_filter:min_buy_ratio")],
+        [
           Markup.button.callback("🛒 Buy Amount", "set_filter:buy_amount"),
           Markup.button.callback("📉 Slippage %", "set_filter:slippage"),
         ],
@@ -149,7 +214,10 @@ export async function handleFilters(ctx: Context): Promise<void> {
             "toggle_honeypot"
           ),
         ],
-        [Markup.button.callback("⬅️ Dashboard", "dashboard")],
+        [
+          Markup.button.callback("🎯 Manual Snipe", "manual_snipe"),
+          Markup.button.callback("⬅️ Dashboard", "dashboard"),
+        ],
       ]),
     }
   );
@@ -166,6 +234,11 @@ export async function handleSetFilter(ctx: Context, field: string): Promise<void
     max_tax: "💸 Send max buy+sell tax percent (e.g. <b>10</b> = 10%):",
     buy_amount: "🛒 Send auto-buy amount in native token (e.g. <b>0.1</b> SOL):",
     slippage: "📉 Send slippage percent (e.g. <b>10</b> for 10%):",
+    min_mc: "🏦 Send minimum market cap in USD (e.g. <b>10000</b>). Send <b>0</b> to disable:",
+    max_mc: "🏦 Send maximum market cap in USD (e.g. <b>5000000</b>). Send <b>0</b> for no maximum:",
+    min_age: "⏱ Send minimum token age in minutes (e.g. <b>5</b>). Send <b>0</b> to disable:",
+    max_age: "⏱ Send maximum token age in minutes (e.g. <b>1440</b> for 1 day). Send <b>0</b> for no maximum:",
+    min_buy_ratio: "🔄 Send minimum buy ratio percent, e.g. <b>55</b> means at least 55% of trades must be buys. Send <b>0</b> to disable:",
   };
 
   await ctx.reply(prompts[field] ?? "Send new value:", { parse_mode: "HTML" });
