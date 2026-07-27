@@ -179,6 +179,7 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
   bot.action("settings",       handleSettings);
   bot.action("filters",        handleFilters);
   bot.action("toggle_honeypot",handleToggleHoneypot);
+  bot.action("manual_snipe",   handleManualSnipePrompt);
   bot.action("bot_stats",      handleBotStats);
   bot.action("help_guide",     handleHelpGuide);
 
@@ -364,12 +365,19 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
       return;
     }
 
-    // Multi-step flow: filter update
+       // Multi-step flow: filter update
     const filterState = getPendingFilter(telegramId);
     if (filterState) {
       await processFilterInput(ctx, text);
       return;
     }
+
+    // Multi-step flow: manual snipe CA (validated against active chain)
+    if (isPendingManualSnipe(telegramId)) {
+      await processManualSnipeCA(ctx, text);
+      return;
+    }
+
 
     // Multi-step flow: custom buy amount
     const customBuy = getPendingCustomBuy(telegramId);
