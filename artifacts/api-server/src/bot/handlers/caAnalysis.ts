@@ -125,7 +125,6 @@ interface ExtraButtonsOpts {
   /** Encoded as "SOL::<ca>" or "EVM:<CHAIN>:<ca>" — used by both rugcheck: and snipe_confirm: callbacks. */
   rugcheckTarget?: string;
 }
-
 const tradeButtonsFor = (ca: string, opts: ExtraButtonsOpts = {}) => {
   const utilityRow: (ReturnType<typeof Markup.button.callback> | ReturnType<typeof Markup.button.url>)[] = [
     Markup.button.callback("📊 Track PnL", `price:${ca}`),
