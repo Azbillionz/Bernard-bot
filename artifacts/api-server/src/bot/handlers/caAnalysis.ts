@@ -134,7 +134,7 @@ const tradeButtonsFor = (ca: string, opts: ExtraButtonsOpts = {}) => {
     utilityRow.push(Markup.button.callback("🔍 RugCheck", `rugcheck:${opts.rugcheckTarget}`));
   }
 
-  const rows = [
+    const rows: (ReturnType<typeof Markup.button.callback> | ReturnType<typeof Markup.button.url>)[][] = [
     [
       Markup.button.callback("💰 Buy 0.1", `buy:${ca}:0.1`),
       Markup.button.callback("💰 Buy 0.5", `buy:${ca}:0.5`),
