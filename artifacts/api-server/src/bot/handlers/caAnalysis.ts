@@ -19,9 +19,8 @@
  * real liquidity/volume/momentum/security data, not a third-party opinion.
  *
  * Every result card also gets: 📊 Track PnL (live price + entry P&L),
- * 📈 Chart (external link, when a pair/pool/pump.fun page exists),
- * 🔍 RugCheck (re-runs just the security scan standalone), and 🎯 Snipe
- * (jumps to the Confirm-Snipe preview instead of buying immediately).
+ * 📈 Chart (external link, when a pair/pool/pump.fun page exists), and
+ * 🔍 RugCheck (re-runs just the security scan standalone).
  */
 
 import type { Context } from "telegraf";
@@ -122,8 +121,7 @@ function fmtAge(ageMinutes?: number): string {
 
 interface ExtraButtonsOpts {
   chartUrl?: string;
-  /** Encoded as "SOL::<ca>" or "EVM:<CHAIN>:<ca>" — used by both the
-   *  rugcheck: and snipe_confirm: callbacks (same resolved-chain target). */
+  /** Encoded as "SOL::<ca>" or "EVM:<CHAIN>:<ca>" — used by the rugcheck: callback. */
   rugcheckTarget?: string;
 }
 
@@ -298,7 +296,6 @@ function buildOnchainOnlyCard(
     ...securityLines,
   ].join("\n");
 }
-
 export async function handleCAAnalysis(ctx: Context, ca: string): Promise<void> {
   const caType = detectCAType(ca);
   if (!caType) return;
