@@ -94,4 +94,16 @@ export async function handleAutoSnipe(ctx: Context): Promise<void> {
     ...Markup.inlineKeyboard([
       [
         Markup.button.callback(
-          newState ? "⏹
+          newState ? "⏹ Turn OFF Auto-Snipe" : "▶️ Turn ON Auto-Snipe",
+          "auto_snipe"
+        ),
+      ],
+      [
+        Markup.button.callback("💳 Deposit SOL", "deposit:SOL"),
+        Markup.button.callback("⚗️ Filters", "filters"),
+      ],
+      [Markup.button.callback("🎯 Manual Snipe", "manual_snipe")],
+      [Markup.button.callback("⬅️ Dashboard", "dashboard")],
+    ]),
+  });
+}
