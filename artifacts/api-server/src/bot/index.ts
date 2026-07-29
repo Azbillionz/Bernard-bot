@@ -46,11 +46,13 @@ import {
   handleToggleHoneypot,
   processFilterInput,
   getPendingFilter,
-} from "./handlers/filters";
 import {
   handleManualSnipePrompt,
   processManualSnipeCA,
   isPendingManualSnipe,
+  handleStartManualSnipe,
+  handleStopSnipe,
+  handleSnipeConfirmPreview,
 } from "./handlers/manualSnipe";
 import { handleBotStats } from "./handlers/botStats";
 
@@ -179,7 +181,22 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
   bot.action("settings",       handleSettings);
   bot.action("filters",        handleFilters);
   bot.action("toggle_honeypot",handleToggleHoneypot);
-  bot.action("manual_snipe",   handleManualSnipePrompt);
+    bot.action("manual_snipe",   handleManualSnipePrompt);
+
+  bot.action(/^manual_snipe_start:(.+)$/, async (ctx) => {
+    const ca = (ctx.match as RegExpMatchArray)[1] ?? "";
+    await handleStartManualSnipe(ctx, ca);
+  });
+
+  bot.action(/^stop_snipe:(\d+)$/, async (ctx) => {
+    const id = (ctx.match as RegExpMatchArray)[1] ?? "";
+    await handleStopSnipe(ctx, id);
+  });
+
+  bot.action(/^snipe_confirm:(.+)$/, async (ctx) => {
+    const target = (ctx.match as RegExpMatchArray)[1] ?? "";
+    await handleSnipeConfirmPreview(ctx, target);
+  });
   bot.action("bot_stats",      handleBotStats);
   bot.action("help_guide",     handleHelpGuide);
 
