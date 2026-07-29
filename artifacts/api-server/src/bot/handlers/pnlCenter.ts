@@ -86,9 +86,11 @@ export async function handlePnlCenter(ctx: Context): Promise<void> {
       const pairs = await getPairsByToken(summary.tokenAddress).catch(() => []);
       const currentPrice = parseFloat(pairs[0]?.priceUsd ?? "0");
       summary.currentPriceUsd = currentPrice;
-      if (summary.totalBought > summary.totalSold) {
-        const remaining = summary.totalBought - summary.totalSold;
-        summary.unrealizedPnl = remaining * currentPrice - summary.totalBought;
+            if (summary.totalBought > summary.totalSold) {
+        const remaining = summary.totalBought - summary.totalSold; // native currency still deployed
+        const priceChangeRatio =
+          summary.entryPriceUsd > 0 ? (currentPrice - summary.entryPriceUsd) / summary.entryPriceUsd : 0;
+        summary.unrealizedPnl = remaining * priceChangeRatio;
       }
     })
   );
