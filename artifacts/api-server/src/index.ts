@@ -65,6 +65,8 @@ if (botToken) {
   await launchBot(bot);
   const { startSnipeMonitor } = await import("./services/snipeMonitor");
   startSnipeMonitor();
+  const { startPendingSnipeQueue } = await import("./services/pendingSnipeQueue");
+  startPendingSnipeQueue();
 } else {
 
   logger.warn("TELEGRAM_BOT_TOKEN not set — bot not started. Set it in Secrets.");
