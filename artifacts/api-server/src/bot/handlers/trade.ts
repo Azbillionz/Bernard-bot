@@ -28,6 +28,10 @@ import { sendJitoBundle, getJitoTipLamports } from "../../services/jito";
 import { get1inchSwap } from "../../services/evmSwap";
 import { simulateEvmTx } from "../../services/flashbots";
 import { getPairsByToken } from "../../services/dexscreener";
+import { searchGeckoToken } from "../../services/geckoTerminal";
+import { getPumpFunToken } from "../../services/pumpfunApi";
+import { getNativeTokenPrice } from "../../services/chainPrice";
+import { detectCAType } from "./caAnalysis";
 import { logger } from "../../lib/logger";
 import { registerPendingClearer } from "../../lib/pendingFlows";
 
@@ -663,10 +667,42 @@ export async function handleLivePrice(ctx: Context, ca: string): Promise<void> {
   });
   if (!user) { await ctx.reply("❌ User not found. Type /start first."); return; }
 
+  // Same waterfall as CA Analysis — a token found via GeckoTerminal or a
+  // PumpFun bonding curve (not yet on DexScreener) should still show here.
+  let current = 0;
+  let tokenSymbol = "?";
+  let tokenName = "Unknown";
+  let found = false;
+
   const pairs = await getPairsByToken(ca);
   const pair = pairs[0];
+  if (pair) {
+    current = parseFloat(pair.priceUsd ?? "0");
+    tokenSymbol = pair.baseToken.symbol ?? "?";
+    tokenName = pair.baseToken.name ?? "Unknown";
+    found = true;
+  } else {
+    const caType = detectCAType(ca);
+    const geckoChain = caType === "SOL" ? "SOL" : user.activeChain;
+    const geckoPool = await searchGeckoToken(ca, geckoChain);
+    if (geckoPool) {
+      current = Number(geckoPool.priceUsd ?? 0);
+      tokenSymbol = geckoPool.baseTokenSymbol;
+      tokenName = geckoPool.baseTokenName;
+      found = true;
+    } else if (caType === "SOL") {
+      const pumpToken = await getPumpFunToken(ca);
+      if (pumpToken) {
+        const solPrice = Number(await getNativeTokenPrice("SOL").catch(() => 0));
+        current = pumpToken.priceNative * solPrice;
+        tokenSymbol = pumpToken.symbol;
+        tokenName = pumpToken.name;
+        found = true;
+      }
+    }
+  }
 
-  if (!pair) {
+  if (!found) {
     await editOrReply(ctx, `❌ No live market data found for:\n<code>${ca}</code>`, {
       parse_mode: "HTML",
       ...Markup.inlineKeyboard([
@@ -679,10 +715,6 @@ export async function handleLivePrice(ctx: Context, ca: string): Promise<void> {
     });
     return;
   }
-
-  const current = parseFloat(pair.priceUsd ?? "0");
-  const tokenSymbol = pair.baseToken.symbol ?? "?";
-  const tokenName = pair.baseToken.name ?? "Unknown";
 
   // Most recent confirmed BUY of this token → entry price for P&L
   const lastBuy = await db.query.tradesTable.findFirst({
