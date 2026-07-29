@@ -5,3 +5,4 @@ export * from "./sniperConfigs";
 export * from "./signals";
 export * from "./copyTrades";
 export * from "./activeSnipes";
+export * from "./pendingSnipes";
