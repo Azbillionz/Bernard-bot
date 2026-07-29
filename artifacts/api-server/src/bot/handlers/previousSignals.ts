@@ -2,7 +2,7 @@ import type { Context } from "telegraf";
 import { Markup } from "telegraf";
 import { db } from "@workspace/db";
 import { usersTable, signalsTable } from "@workspace/db";
-import { eq, desc } from "drizzle-orm";
+import { eq, and, desc } from "drizzle-orm";
 import { safeReply } from "../../lib/ctxHelper";
 
 export async function handlePreviousSignals(ctx: Context): Promise<void> {
@@ -17,7 +17,7 @@ export async function handlePreviousSignals(ctx: Context): Promise<void> {
   const signals = await db
     .select()
     .from(signalsTable)
-    .where(eq(signalsTable.userId, user.id))
+    .where(and(eq(signalsTable.userId, user.id), eq(signalsTable.chain, user.activeChain)))
     .orderBy(desc(signalsTable.triggeredAt))
     .limit(10);
 
@@ -30,12 +30,13 @@ export async function handlePreviousSignals(ctx: Context): Promise<void> {
     await safeReply(
       ctx,
       [
-        `📋 <b>Previous Signals</b>`,
+        `📋 <b>Previous Signals</b> — ${user.activeChain}`,
         `—`,
-        `No signals yet.`,
+        `No signals yet on ${user.activeChain}.`,
         ``,
         `Start the <b>PumpFun Listener</b> or enable <b>Group Scanner</b>`,
-        `to automatically capture contract addresses.`,
+        `to automatically capture contract addresses, or paste a CA to`,
+        `analyze one manually.`,
       ].join("\n"),
       { parse_mode: "HTML", ...nav }
     );
@@ -45,7 +46,7 @@ export async function handlePreviousSignals(ctx: Context): Promise<void> {
   const lines = signals.map((s, i) => {
     const ts = s.triggeredAt.toISOString().slice(0, 16).replace("T", " ");
     return [
-      `${i + 1}. <b>${s.tokenSymbol}</b> [${s.chain}] — ${s.source}`,
+      `${i + 1}. <b>${s.tokenSymbol}</b> — ${s.source}`,
       `   🕐 ${ts} UTC`,
       `   CA: <code>${s.tokenAddress}</code>`,
     ].join("\n");
@@ -53,7 +54,7 @@ export async function handlePreviousSignals(ctx: Context): Promise<void> {
 
   await safeReply(
     ctx,
-    [`📋 <b>Previous Signals</b> (last ${signals.length})`, `—`, lines.join("\n\n")].join("\n"),
+    [`📋 <b>Previous Signals</b> — ${user.activeChain} (last ${signals.length})`, `—`, lines.join("\n\n")].join("\n"),
     { parse_mode: "HTML", ...nav }
   );
 }
