@@ -10,23 +10,20 @@
  * same executeBuy path as a normal buy, then registers the position for
  * recurring ~20-minute progress notifications (services/snipeMonitor.ts),
  * on top of the existing 🔄 Refresh / 📊 Track PnL button for on-demand checks.
- *
- * "🎯 Snipe" (from a CA analysis card, New Runners, or Trending) is a
- * separate faster path: skips the filter-check review and goes straight to
- * a CONFIRM SNIPE screen showing computed TP/SL price targets.
  */
 
 import type { Context } from "telegraf";
 import { Markup } from "telegraf";
 import { db } from "@workspace/db";
-import { usersTable, sniperConfigsTable, tradesTable, activeSnipesTable } from "@workspace/db";
+import { usersTable, sniperConfigsTable, tradesTable, activeSnipesTable, walletsTable } from "@workspace/db";
 import { eq, and, desc, gt } from "drizzle-orm";
 import { getPairsByToken } from "../../services/dexscreener";
 import { searchGeckoToken } from "../../services/geckoTerminal";
 import { getPumpFunToken } from "../../services/pumpfunApi";
-import { getNativeTokenPrice } from "../../services/chainPrice";
+import { getNativeTokenPrice, getChainBalance } from "../../services/chainPrice";
 import { checkEvmToken, checkSolanaToken } from "../../services/goplus";
 import { stopSnipeTracking } from "../../services/snipeMonitor";
+import { queuePendingAutoSnipe } from "../../services/pendingSnipeQueue";
 import { scoreToken, type ScoreInput } from "../../services/tokenScore";
 import {
   detectCAType,
@@ -261,25 +258,67 @@ export async function processManualSnipeCA(ctx: Context, ca: string): Promise<vo
 }
 
 /**
- * "🎯 Start Manual Snipe" — reuses the exact same buy path as a normal
- * manual buy (handleBuy already checks/reports insufficient balance), then
- * registers the position for periodic 20-minute updates if the buy actually
- * confirmed.
+ * "🎯 Start Manual Snipe" — checks the wallet balance directly (so the
+ * outcome is always an explicit message, never silence): funded → buys
+ * immediately via the same path as a normal buy and starts 20-min progress
+ * tracking; not funded → tells the user to fund the wallet AND queues the
+ * token so services/pendingSnipeQueue.ts fires the buy automatically the
+ * moment the balance is sufficient (checked every minute, up to 1 hour).
  */
 export async function handleStartManualSnipe(ctx: Context, ca: string): Promise<void> {
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
 
   const user = await db.query.usersTable.findFirst({ where: eq(usersTable.telegramId, telegramId) });
-  if (!user) return;
+  if (!user) { await ctx.reply("❌ Send /start first."); return; }
+
+  const wallet = await db.query.walletsTable.findFirst({
+    where: and(eq(walletsTable.userId, user.id), eq(walletsTable.chain, user.activeChain), eq(walletsTable.isActive, true)),
+  });
+  if (!wallet) {
+    await ctx.reply("❌ No active wallet for this chain. Set one up in 💼 Wallet Manager first.");
+    return;
+  }
 
   const config = await db.query.sniperConfigsTable.findFirst({ where: eq(sniperConfigsTable.userId, user.id) });
   const buyAmount = config?.autoBuyAmountNative ?? "0.1";
+  const buyAmountNum = parseFloat(buyAmount);
+
+  const balance = parseFloat(await getChainBalance(user.activeChain, wallet.address).catch(() => "0"));
+
+  if (balance < buyAmountNum) {
+    const metrics = await fetchQuickMetrics(ca, user.activeChain);
+    await ctx.reply(
+      [
+        `⚠️ <b>Insufficient balance</b>`,
+        `💼 Wallet: <b>${balance.toFixed(4)} ${user.activeChain}</b>`,
+        `🛒 Needed: <b>${buyAmount} ${user.activeChain}</b>`,
+        ``,
+        `📥 Fund your wallet:`,
+        `<code>${wallet.address}</code>`,
+        ``,
+        `✅ This snipe is now <b>queued</b> — I'll check your balance every minute and buy automatically the moment it's funded (queue expires after 1 hour).`,
+      ].join("\n"),
+      { parse_mode: "HTML" }
+    );
+
+    await queuePendingAutoSnipe({
+      dbUserId: user.id,
+      telegramId,
+      chain: user.activeChain,
+      ca,
+      tokenSymbol: metrics.tokenSymbol,
+      tokenName: metrics.tokenName,
+      priceUsd: String(metrics.priceUsd),
+      liquidityUsd: metrics.liquidityUsd,
+      buyAmountNative: buyAmount,
+    });
+    return;
+  }
 
   const before = new Date();
-  await handleBuy(ctx, ca, buyAmount); // already tells the user to fund the wallet if balance is insufficient
+  await handleBuy(ctx, ca, buyAmount);
 
-  // Confirm whether the buy actually went through before starting tracking
   const confirmedTrade = await db.query.tradesTable.findFirst({
     where: and(
       eq(tradesTable.userId, user.id),
@@ -291,7 +330,7 @@ export async function handleStartManualSnipe(ctx: Context, ca: string): Promise<
     orderBy: [desc(tradesTable.createdAt)],
   });
 
-  if (!confirmedTrade) return; // insufficient balance or buy failed — handleBuy already told the user
+  if (!confirmedTrade) return; // handleBuy already reported the failure reason
 
   await db.insert(activeSnipesTable).values({
     userId: user.id,
