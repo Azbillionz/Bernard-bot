@@ -250,3 +250,90 @@ export function startPumpfunListener(dbUserId: number, telegramId: number, chatI
   ws.connect();
   activeListeners.set(dbUserId, ws);
 }
+
+export async function handlePumpfun(ctx: Context): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  const user = await db.query.usersTable.findFirst({
+    where: eq(usersTable.telegramId, telegramId),
+  });
+  if (!user) { await ctx.reply("❌ User not found. Send /start first."); return; }
+
+  // Toggle off
+  if (activeListeners.has(user.id)) {
+    stopPumpfunListener(user.id);
+    await safeReply(
+      ctx,
+      [
+        `🌱 <b>PumpFun / Moonshot Snipe</b>`,
+        ``,
+        `🔴 Listener <b>stopped</b>.`,
+        `Tap Start to resume monitoring new launches.`,
+      ].join("\n"),
+      {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("▶️ Start Listener", "pumpfun")],
+          [Markup.button.callback("⬅️ Dashboard", "dashboard")],
+        ]),
+      }
+    );
+    return;
+  }
+
+  // Check SOL wallet + balance before starting
+  const wallet = await db.query.walletsTable.findFirst({
+    where: and(
+      eq(walletsTable.userId, user.id),
+      eq(walletsTable.chain, "SOL"),
+      eq(walletsTable.isActive, true)
+    ),
+  });
+
+  const config = await db.query.sniperConfigsTable.findFirst({
+    where: eq(sniperConfigsTable.userId, user.id),
+  });
+
+  const rawAutoBuy = parseFloat(config?.autoBuyAmountNative ?? "0.1");
+  const autoBuyAmount = Number(
+    Math.min(Math.max(Number.isFinite(rawAutoBuy) ? rawAutoBuy : 0.1, 0.000001), 1000).toFixed(6)
+  );
+  const autoSnipe = user.autoSnipe ?? false;
+
+  let balanceWarning = "";
+  if (autoSnipe) {
+    if (!wallet) {
+      balanceWarning = `\n⚠️ <b>No SOL wallet!</b> Auto-snipe is ON but you have no wallet. Go to 💼 Wallet Manager first.`;
+    } else {
+      const bal = parseFloat(await getChainBalance("SOL", wallet.address).catch(() => "0"));
+      if (bal < autoBuyAmount) {
+        balanceWarning = `\n⚠️ <b>Low balance!</b> Your wallet has <b>${bal.toFixed(4)} SOL</b> but auto-buy is set to <b>${autoBuyAmount} SOL</b>.\nDeposit more SOL or reduce the buy amount in ⚗️ Filters. New launches will queue and auto-buy once funded.`;
+      }
+    }
+  }
+
+  const chatId = ctx.chat?.id ?? telegramId;
+  startPumpfunListener(user.id, telegramId, chatId);
+
+  const autoSnipeStatus = autoSnipe
+    ? `⚡ <b>Auto-Snipe: ON</b> — will auto-buy matching launches${balanceWarning}`
+    : `🔴 Auto-Snipe: OFF — tap 🤖 Auto-Snipe to enable automatic buying`;
+
+  await safeReply(
+    ctx,
+    [
+      `🌱 <b>PumpFun / Moonshot Snipe</b>`,
+      ``,
+      `🟢 Listener <b>active</b> — watching new Solana token launches.`,
+      `You'll receive an alert with buy buttons for every new mint.`,
+      ``,
+      autoSnipeStatus,
+    ].join("\n"),
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("⏹ Stop Listener", "pumpfun")],
+        [
+          Markup.button.callback("🤖 Auto-Snipe Settings", "auto_snipe"),
+          Markup.button.callback("⚗️ Filters", "
