@@ -46,6 +46,7 @@ import {
   handleToggleHoneypot,
   processFilterInput,
   getPendingFilter,
+} from "./handlers/filters";
 import {
   handleManualSnipePrompt,
   processManualSnipeCA,
