@@ -336,4 +336,39 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
         [Markup.button.callback("⏹ Stop Listener", "pumpfun")],
         [
           Markup.button.callback("🤖 Auto-Snipe Settings", "auto_snipe"),
-          Markup.button.callback("⚗️ Filters", "
+          Markup.button.callback("⚗️ Filters", "filters"),
+        ],
+        [Markup.button.callback("⬅️ Dashboard", "dashboard")],
+      ]),
+    }
+  );
+}
+
+/**
+ * Queues a token that passed all filters but couldn't be bought due to
+ * insufficient balance. pendingSnipeQueue.ts polls these every minute and
+ * fires the buy automatically the moment the wallet is funded.
+ */
+async function queuePendingSnipe(
+  dbUserId: number,
+  telegramId: number,
+  ca: string,
+  tokenSymbol: string,
+  tokenName: string,
+  priceUsd: string,
+  liquidityUsd: number,
+  buyAmountNative: number
+): Promise<void> {
+  const { queuePendingAutoSnipe } = await import("../../services/pendingSnipeQueue");
+  await queuePendingAutoSnipe({
+    dbUserId,
+    telegramId,
+    chain: "SOL",
+    ca,
+    tokenSymbol,
+    tokenName,
+    priceUsd,
+    liquidityUsd,
+    buyAmountNative: String(buyAmountNative),
+  });
+}
