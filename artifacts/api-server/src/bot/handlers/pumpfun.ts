@@ -2,6 +2,15 @@
  * PumpFun / Moonshot live sniper.
  * Listens to PumpPortal WebSocket for new token mints.
  * When autoSnipe=true, applies sniper filters then auto-executes buy.
+ *
+ * The listener is started/stopped from TWO places that both need to agree:
+ *  - the 🌱 PumpFun screen (manual start/stop of live alerts)
+ *  - the 🤖 Auto-Snipe toggle (turning auto-buy on/off)
+ * Both call the same startPumpfunListener/stopPumpfunListener functions so
+ * there's exactly one listener per user and no stale/disconnected state.
+ * The auto-snipe check inside the listener always re-reads the DB flag at
+ * fire time — never a captured value from when the listener started — so
+ * toggling Auto-Snipe on/off takes effect immediately without restarting.
  */
 
 import type { Context } from "telegraf";
@@ -36,73 +45,20 @@ export function isPumpfunListenerActive(dbUserId: number): boolean {
   return activeListeners.has(dbUserId);
 }
 
-export async function handlePumpfun(ctx: Context): Promise<void> {
-  const telegramId = ctx.from?.id;
-  if (!telegramId) return;
+export function stopPumpfunListener(dbUserId: number): void {
+  activeListeners.get(dbUserId)?.destroy();
+  activeListeners.delete(dbUserId);
+}
 
-  const user = await db.query.usersTable.findFirst({
-    where: eq(usersTable.telegramId, telegramId),
-  });
-  if (!user) { await ctx.reply("❌ User not found. Send /start first."); return; }
-
-  // Toggle off
-  if (activeListeners.has(user.id)) {
-    activeListeners.get(user.id)?.destroy();
-    activeListeners.delete(user.id);
-    await safeReply(
-      ctx,
-      [
-        `🌱 <b>PumpFun / Moonshot Snipe</b>`,
-        ``,
-        `🔴 Listener <b>stopped</b>.`,
-        `Tap Start to resume monitoring new launches.`,
-      ].join("\n"),
-      {
-        parse_mode: "HTML",
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback("▶️ Start Listener", "pumpfun")],
-          [Markup.button.callback("⬅️ Dashboard", "dashboard")],
-        ]),
-      }
-    );
-    return;
-  }
-
-  // Check SOL wallet + balance before starting
-  const wallet = await db.query.walletsTable.findFirst({
-    where: and(
-      eq(walletsTable.userId, user.id),
-      eq(walletsTable.chain, "SOL"),
-      eq(walletsTable.isActive, true)
-    ),
-  });
-
-  const config = await db.query.sniperConfigsTable.findFirst({
-    where: eq(sniperConfigsTable.userId, user.id),
-  });
-
-  // Clamp + cap at 6 decimals so `buy:MINT:AMT` callback data stays under
-  // Telegram's 64-byte limit even with 44-char Solana mints.
-  const rawAutoBuy = parseFloat(config?.autoBuyAmountNative ?? "0.1");
-  const autoBuyAmount = Number(
-    Math.min(Math.max(Number.isFinite(rawAutoBuy) ? rawAutoBuy : 0.1, 0.000001), 1000).toFixed(6)
-  );
-  const autoSnipe = user.autoSnipe ?? false;
-
-  let balanceWarning = "";
-  if (autoSnipe) {
-    if (!wallet) {
-      balanceWarning = `\n⚠️ <b>No SOL wallet!</b> Auto-snipe is ON but you have no wallet. Go to 💼 Wallet Manager first.`;
-    } else {
-      const bal = parseFloat(await getChainBalance("SOL", wallet.address).catch(() => "0"));
-      if (bal < autoBuyAmount) {
-        balanceWarning = `\n⚠️ <b>Low balance!</b> Your wallet has <b>${bal.toFixed(4)} SOL</b> but auto-buy is set to <b>${autoBuyAmount} SOL</b>.\nDeposit more SOL or reduce the buy amount in ⚗️ Filters.`;
-      }
-    }
-  }
-
-  const chatId = ctx.chat?.id ?? telegramId;
-  const dbUserId = user.id;
+/**
+ * Starts (or no-ops if already running) the live PumpFun listener for a
+ * user. Auto-snipe eligibility is re-checked fresh from the DB on every
+ * single new-token event — this function does not "bake in" the current
+ * autoSnipe value, so toggling it elsewhere takes effect on the very next
+ * detected token without needing to restart anything.
+ */
+export function startPumpfunListener(dbUserId: number, telegramId: number, chatId: number): void {
+  if (activeListeners.has(dbUserId)) return; // already running
 
   const ws = new WsManager(
     PUMPFUN_WSS,
@@ -184,11 +140,20 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
         ].filter(Boolean).join(" | ");
         if (launchStats) tokenMsg += `\n${launchStats}`;
 
+        // ── Always fetch fresh config for this token's quick-buy amount ───
+        const freshConfig0 = await db.query.sniperConfigsTable.findFirst({
+          where: eq(sniperConfigsTable.userId, dbUserId),
+        });
+        const rawAutoBuy = parseFloat(freshConfig0?.autoBuyAmountNative ?? "0.1");
+        const quickBuyAmount = Number(
+          Math.min(Math.max(Number.isFinite(rawAutoBuy) ? rawAutoBuy : 0.1, 0.000001), 1000).toFixed(6)
+        );
+
         // ── Alert user with analyze + quick buy buttons ─────────────────
         await queueMessage(chatId, tokenMsg, "HTML", [
           [
             { text: "📊 Analyze", callback_data: `analyze:${mint}` },
-            { text: "💰 Quick Buy", callback_data: `buy:${mint}:${autoBuyAmount}` },
+            { text: "💰 Quick Buy", callback_data: `buy:${mint}:${quickBuyAmount}` },
           ],
         ]);
 
@@ -202,10 +167,9 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
           priceUsd,
         }).catch(() => undefined);
 
-        // ── Auto-snipe ───────────────────────────────────────────────────
-        if (!autoSnipe) return;
-
-        // Re-fetch user state to catch toggle changes
+        // ── Auto-snipe — ALWAYS re-read the live DB flag, never a value
+        //    captured when the listener started, so toggling Auto-Snipe
+        //    on/off elsewhere takes effect on the very next token. ───────
         const freshUser = await db.query.usersTable.findFirst({
           where: eq(usersTable.id, dbUserId),
         });
@@ -237,7 +201,7 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
           }
         }
 
-        // Check balance again right before firing
+        // Check balance right before firing
         const freshWallet = await db.query.walletsTable.findFirst({
           where: and(eq(walletsTable.userId, dbUserId), eq(walletsTable.chain, "SOL"), eq(walletsTable.isActive, true)),
         });
@@ -253,13 +217,15 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
             [
               `⚠️ <b>Auto-Snipe Skipped — Insufficient Balance</b>`,
               `🪙 Token: <b>${symbolSafe}</b>`,
+              `📍 CA: <code>${mint}</code>`,
               `💼 Your balance: <b>${currentBal.toFixed(4)} SOL</b>`,
               `🛒 Required: <b>${buyAmt} SOL</b>`,
               ``,
-              `Deposit SOL to your wallet to enable auto-sniping.`,
+              `Fund your wallet — this token stays queued and will auto-buy the moment your balance covers it (checked every minute for the next hour).`,
             ].join("\n"),
             "HTML"
           );
+          void queuePendingSnipe(dbUserId, telegramId, mint, symbol, name, priceUsd, liquidityUsd, buyAmt);
           return;
         }
 
@@ -282,32 +248,5 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
   );
 
   ws.connect();
-  activeListeners.set(user.id, ws);
-
-  const autoSnipeStatus = autoSnipe
-    ? `⚡ <b>Auto-Snipe: ON</b> — will auto-buy matching launches${balanceWarning}`
-    : `🔴 Auto-Snipe: OFF — tap 🤖 Auto-Snipe to enable automatic buying`;
-
-  await safeReply(
-    ctx,
-    [
-      `🌱 <b>PumpFun / Moonshot Snipe</b>`,
-      ``,
-      `🟢 Listener <b>active</b> — watching new Solana token launches.`,
-      `You'll receive an alert with buy buttons for every new mint.`,
-      ``,
-      autoSnipeStatus,
-    ].join("\n"),
-    {
-      parse_mode: "HTML",
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback("⏹ Stop Listener", "pumpfun")],
-        [
-          Markup.button.callback("🤖 Auto-Snipe Settings", "auto_snipe"),
-          Markup.button.callback("⚗️ Filters", "filters"),
-        ],
-        [Markup.button.callback("⬅️ Dashboard", "dashboard")],
-      ]),
-    }
-  );
+  activeListeners.set(dbUserId, ws);
 }
