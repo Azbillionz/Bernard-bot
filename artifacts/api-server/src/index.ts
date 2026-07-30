@@ -67,6 +67,21 @@ if (botToken) {
   startSnipeMonitor();
   const { startPendingSnipeQueue } = await import("./services/pendingSnipeQueue");
   startPendingSnipeQueue();
+
+  // The PumpFun/Auto-Snipe listener only lives in memory — every deploy or
+  // restart wipes it out. Without this, users would need to manually
+  // re-toggle Auto-Snipe or re-open PumpFun after every single redeploy.
+  const { startPumpfunListener } = await import("./bot/handlers/pumpfun");
+  const { db: dbClient, usersTable } = await import("@workspace/db");
+  const { eq: eqOp } = await import("drizzle-orm");
+  const autoSnipeUsers = await dbClient
+    .select()
+    .from(usersTable)
+    .where(eqOp(usersTable.autoSnipe, true));
+  for (const u of autoSnipeUsers) {
+    startPumpfunListener(u.id, u.telegramId, u.telegramId);
+  }
+  logger.info({ count: autoSnipeUsers.length }, "Resumed PumpFun listeners for Auto-Snipe users");
 } else {
 
   logger.warn("TELEGRAM_BOT_TOKEN not set — bot not started. Set it in Secrets.");
