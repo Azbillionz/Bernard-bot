@@ -10,7 +10,7 @@ import { logger } from "../lib/logger";
 import { renderDashboard } from "./dashboard";
 import { handleNewRunners } from "./handlers/newRunners";
 import { handleTrending } from "./handlers/trending";
-import { handlePumpfun } from "./handlers/pumpfun";
+import { handlePumpfun, handlePumpfunStop } from "./handlers/pumpfun";
 import { handlePreviousSignals } from "./handlers/previousSignals";
 import {
   handleWalletManager,
@@ -38,7 +38,7 @@ import {
 import { handleGroupScanner, scanGroupMessage } from "./handlers/groupScanner";
 import { handlePnlCenter } from "./handlers/pnlCenter";
 import { handleMyTrades } from "./handlers/myTrades";
-import { handleAutoSnipe } from "./handlers/autoSnipe";
+import { handleAutoSnipe, handleAutoSnipeToggle } from "./handlers/autoSnipe";
 import { handleSettings, handleSetChain } from "./handlers/settings";
 import {
   handleFilters,
@@ -171,6 +171,7 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
   bot.action("new_runners",    handleNewRunners);
   bot.action("trending",       handleTrending);
   bot.action("pumpfun",        handlePumpfun);
+  bot.action("pumpfun_stop",   handlePumpfunStop);
   bot.action("prev_signals",   handlePreviousSignals);
   bot.action("wallet_manager", handleWalletManager);
   bot.action("copy_trade",     handleCopyTrade);
@@ -179,6 +180,7 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
   bot.action("pnl_center",     handlePnlCenter);
   bot.action("my_trades",      handleMyTrades);
   bot.action("auto_snipe",     handleAutoSnipe);
+  bot.action("auto_snipe_toggle", handleAutoSnipeToggle);
   bot.action("settings",       handleSettings);
   bot.action("filters",        handleFilters);
   bot.action("toggle_honeypot",handleToggleHoneypot);
