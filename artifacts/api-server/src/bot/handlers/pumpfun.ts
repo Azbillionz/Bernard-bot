@@ -251,6 +251,14 @@ export function startPumpfunListener(dbUserId: number, telegramId: number, chatI
   activeListeners.set(dbUserId, ws);
 }
 
+/**
+ * Opens the PumpFun screen — this is now idempotent: it always ensures the
+ * listener is running and just reports status, it never stops anything.
+ * Previously this single action both started AND stopped the listener
+ * depending on current state, which meant simply re-opening this menu
+ * (e.g. navigating Dashboard → PumpFun again) would silently kill a
+ * running listener. Stopping now requires the explicit Stop button below.
+ */
 export async function handlePumpfun(ctx: Context): Promise<void> {
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
@@ -316,38 +324,6 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
           Markup.button.callback("🤖 Auto-Snipe Settings", "auto_snipe"),
           Markup.button.callback("⚗️ Filters", "filters"),
         ],
-        [Markup.button.callback("⬅️ Dashboard", "dashboard")],
-      ]),
-    }
-  );
-}
-
-/**
- * Explicit stop — only reachable via the "⏹ Stop Listener" button, never
- * by just re-opening the PumpFun menu.
- */
-export async function handlePumpfunStop(ctx: Context): Promise<void> {
-  const telegramId = ctx.from?.id;
-  if (!telegramId) return;
-
-  const user = await db.query.usersTable.findFirst({
-    where: eq(usersTable.telegramId, telegramId),
-  });
-  if (!user) { await ctx.reply("❌ User not found. Send /start first."); return; }
-
-  stopPumpfunListener(user.id);
-  await safeReply(
-    ctx,
-    [
-      `🌱 <b>PumpFun / Moonshot Snipe</b>`,
-      ``,
-      `🔴 Listener <b>stopped</b>.`,
-      `Tap Start to resume monitoring new launches.`,
-    ].join("\n"),
-    {
-      parse_mode: "HTML",
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback("▶️ Start Listener", "pumpfun")],
         [Markup.button.callback("⬅️ Dashboard", "dashboard")],
       ]),
     }
