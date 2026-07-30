@@ -260,28 +260,6 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
   });
   if (!user) { await ctx.reply("❌ User not found. Send /start first."); return; }
 
-  // Toggle off
-  if (activeListeners.has(user.id)) {
-    stopPumpfunListener(user.id);
-    await safeReply(
-      ctx,
-      [
-        `🌱 <b>PumpFun / Moonshot Snipe</b>`,
-        ``,
-        `🔴 Listener <b>stopped</b>.`,
-        `Tap Start to resume monitoring new launches.`,
-      ].join("\n"),
-      {
-        parse_mode: "HTML",
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback("▶️ Start Listener", "pumpfun")],
-          [Markup.button.callback("⬅️ Dashboard", "dashboard")],
-        ]),
-      }
-    );
-    return;
-  }
-
   // Check SOL wallet + balance before starting
   const wallet = await db.query.walletsTable.findFirst({
     where: and(
@@ -314,7 +292,7 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
   }
 
   const chatId = ctx.chat?.id ?? telegramId;
-  startPumpfunListener(user.id, telegramId, chatId);
+  startPumpfunListener(user.id, telegramId, chatId); // no-op if already running
 
   const autoSnipeStatus = autoSnipe
     ? `⚡ <b>Auto-Snipe: ON</b> — will auto-buy matching launches${balanceWarning}`
@@ -333,11 +311,75 @@ export async function handlePumpfun(ctx: Context): Promise<void> {
     {
       parse_mode: "HTML",
       ...Markup.inlineKeyboard([
-        [Markup.button.callback("⏹ Stop Listener", "pumpfun")],
+        [Markup.button.callback("⏹ Stop Listener", "pumpfun_stop")],
         [
           Markup.button.callback("🤖 Auto-Snipe Settings", "auto_snipe"),
           Markup.button.callback("⚗️ Filters", "filters"),
         ],
+        [Markup.button.callback("⬅️ Dashboard", "dashboard")],
+      ]),
+    }
+  );
+}
+
+/**
+ * Explicit stop — only reachable via the "⏹ Stop Listener" button, never
+ * by just re-opening the PumpFun menu.
+ */
+export async function handlePumpfunStop(ctx: Context): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  const user = await db.query.usersTable.findFirst({
+    where: eq(usersTable.telegramId, telegramId),
+  });
+  if (!user) { await ctx.reply("❌ User not found. Send /start first."); return; }
+
+  stopPumpfunListener(user.id);
+  await safeReply(
+    ctx,
+    [
+      `🌱 <b>PumpFun / Moonshot Snipe</b>`,
+      ``,
+      `🔴 Listener <b>stopped</b>.`,
+      `Tap Start to resume monitoring new launches.`,
+    ].join("\n"),
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("▶️ Start Listener", "pumpfun")],
+        [Markup.button.callback("⬅️ Dashboard", "dashboard")],
+      ]),
+    }
+  );
+}
+
+/**
+ * Explicit stop — only reachable via the "⏹ Stop Listener" button, never
+ * by just re-opening the PumpFun menu.
+ */
+export async function handlePumpfunStop(ctx: Context): Promise<void> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  const user = await db.query.usersTable.findFirst({
+    where: eq(usersTable.telegramId, telegramId),
+  });
+  if (!user) { await ctx.reply("❌ User not found. Send /start first."); return; }
+
+  stopPumpfunListener(user.id);
+  await safeReply(
+    ctx,
+    [
+      `🌱 <b>PumpFun / Moonshot Snipe</b>`,
+      ``,
+      `🔴 Listener <b>stopped</b>.`,
+      `Tap Start to resume monitoring new launches.`,
+    ].join("\n"),
+    {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("▶️ Start Listener", "pumpfun")],
         [Markup.button.callback("⬅️ Dashboard", "dashboard")],
       ]),
     }
