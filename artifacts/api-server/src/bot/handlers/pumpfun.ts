@@ -62,8 +62,10 @@ export function startPumpfunListener(dbUserId: number, telegramId: number, chatI
 
   const ws = new WsManager(
     PUMPFUN_WSS,
-    async (raw) => {
+        async (raw) => {
       try {
+        logger.info({ preview: raw.slice(0, 200) }, "PumpFun WS message received");
+
         const data = JSON.parse(raw) as {
           txType?: string;
           mint?: string;
