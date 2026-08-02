@@ -19,6 +19,9 @@ export const sniperConfigsTable = pgTable("bot_sniper_configs", {
   minAgeMinutes: integer("min_age_minutes").notNull().default(0),
   maxAgeMinutes: integer("max_age_minutes").notNull().default(0),
   minBuyRatioPercent: integer("min_buy_ratio_percent").notNull().default(0),
+  // "fixed" = always buy autoBuyAmountNative; "percent" = buy positionSizePercent% of current wallet balance
+  buySizeMode: text("buy_size_mode").notNull().default("fixed"),
+  positionSizePercent: integer("position_size_percent").notNull().default(10),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
 
