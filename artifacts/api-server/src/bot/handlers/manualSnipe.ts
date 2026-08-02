@@ -22,6 +22,7 @@ import { searchGeckoToken } from "../../services/geckoTerminal";
 import { getPumpFunToken } from "../../services/pumpfunApi";
 import { getNativeTokenPrice, getChainBalance } from "../../services/chainPrice";
 import { computeBuyAmount } from "../../services/positionSizing";
+import { pickTradingWallet } from "../../services/walletRotation";
 import { checkEvmToken, checkSolanaToken } from "../../services/goplus";
 import { stopSnipeTracking } from "../../services/snipeMonitor";
 import { queuePendingAutoSnipe } from "../../services/pendingSnipeQueue";
@@ -273,9 +274,7 @@ export async function handleStartManualSnipe(ctx: Context, ca: string): Promise<
   const user = await db.query.usersTable.findFirst({ where: eq(usersTable.telegramId, telegramId) });
   if (!user) { await ctx.reply("❌ Send /start first."); return; }
 
-  const wallet = await db.query.walletsTable.findFirst({
-    where: and(eq(walletsTable.userId, user.id), eq(walletsTable.chain, user.activeChain), eq(walletsTable.isActive, true)),
-  });
+    const wallet = await pickTradingWallet(user.id, user.activeChain);
   if (!wallet) {
     await ctx.reply("❌ No active wallet for this chain. Set one up in 💼 Wallet Manager first.");
     return;
