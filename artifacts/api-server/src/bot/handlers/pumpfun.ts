@@ -25,6 +25,7 @@ import { getPumpFunToken } from "../../services/pumpfunApi";
 import { getNativeTokenPrice, getChainBalance } from "../../services/chainPrice";
 import { checkSolanaToken } from "../../services/goplus";
 import { queueMessage } from "../../workers/messageQueue";
+import { computeBuyAmount } from "../../services/positionSizing";
 import { triggerAutoSnipeBuy } from "./trade";
 import { logger } from "../../lib/logger";
 import { safeReply } from "../../lib/ctxHelper";
@@ -211,9 +212,9 @@ export function startPumpfunListener(dbUserId: number, telegramId: number, chatI
           await queueMessage(telegramId, `⚠️ <b>Auto-Snipe Skipped</b> — No SOL wallet found. Go to 💼 Wallet Manager to set one up.`, "HTML");
           return;
         }
-        const currentBal = parseFloat(await getChainBalance("SOL", freshWallet.address).catch(() => "0"));
-        const buyAmt = parseFloat(freshConfig?.autoBuyAmountNative ?? "0.1");
-        if (currentBal < buyAmt) {
+                const currentBal = parseFloat(await getChainBalance("SOL", freshWallet.address).catch(() => "0"));
+        const buyAmt = computeBuyAmount(freshConfig, "SOL", currentBal);
+        if (buyAmt <= 0 || currentBal < buyAmt) {
           await queueMessage(
             telegramId,
             [
