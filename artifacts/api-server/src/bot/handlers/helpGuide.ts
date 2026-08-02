@@ -6,7 +6,7 @@ export async function handleHelpGuide(ctx: Context): Promise<void> {
 
   await ctx.editMessageText(
     [
-            `❓ <b>RektProof Bot — Help & Guide</b>`,
+            `❓ <b>MAESTRO_BOT — Help & Guide</b>`,
       `—`,
       `<b>🔍 Scanning</b>`,
       `• Send any CA (Solana base58 / EVM 0x...) to instantly analyze it`,
