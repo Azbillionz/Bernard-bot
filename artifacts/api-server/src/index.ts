@@ -93,7 +93,7 @@ const server = app.listen(port, (err?: Error) => {
     logger.error({ err }, "Error starting server");
     process.exit(1);
   }
-    logger.info({ port }, "REKTPROOF_BOT server listening");
+    logger.info({ port }, "MAESTRO_BOT server listening");
 });
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────
