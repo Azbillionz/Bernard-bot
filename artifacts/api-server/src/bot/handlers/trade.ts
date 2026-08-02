@@ -154,7 +154,7 @@ async function executeBuy(ctx: Context, ca: string, amount: number): Promise<voi
   });
   if (!user) { await ctx.reply("❌ User not found. Type /start first."); return; }
 
-    const wallet = await pickTradingWallet(user.id, user.activeChain);
+  const wallet = await pickTradingWallet(user.id, user.activeChain);
   if (!wallet) {
     await ctx.reply(
       "❌ No active wallet for this chain. Add one in 💼 Wallet Manager.",
@@ -279,7 +279,7 @@ async function executeBuy(ctx: Context, ca: string, amount: number): Promise<voi
       txHash = tx.hash;
     }
 
-        await db.update(tradesTable)
+    await db.update(tradesTable)
       .set({ status: "CONFIRMED", txHash: txHash ?? undefined })
       .where(eq(tradesTable.id, trade!.id));
     void markWalletUsed(wallet.id);
@@ -364,7 +364,7 @@ export async function triggerAutoSnipeBuy(params: AutoSnipeParams): Promise<void
       .catch(() => undefined);
 
   try {
-        const wallet = await pickTradingWallet(dbUserId, "SOL");
+    const wallet = await pickTradingWallet(dbUserId, "SOL");
     if (!wallet) {
       await send(`⚡ <b>Auto-Snipe skipped</b> — no active SOL wallet.\n🪙 Token: <b>${symbolSafe}</b> <code>${ca}</code>`);
       return;
@@ -447,6 +447,7 @@ export async function triggerAutoSnipeBuy(params: AutoSnipeParams): Promise<void
     await db.update(tradesTable)
       .set({ status: "CONFIRMED", txHash: result.txHash })
       .where(eq(tradesTable.id, trade!.id));
+    void markWalletUsed(wallet.id);
 
     // ── Notify: position opened, with manage buttons ──────────────────────
     await send(
@@ -581,7 +582,7 @@ async function executeSell(ctx: Context, ca: string, percent: number): Promise<v
       txHash = await sendJitoBundle([signedBase64]);
       if (!txHash) throw new Error("Jito bundle rejected");
 
-            const solOut = parseFloat(quote.outAmount) / 1e9;
+      const solOut = parseFloat(quote.outAmount) / 1e9;
       await db.update(tradesTable)
         .set({ status: "CONFIRMED", txHash, amountOut: String(solOut) })
         .where(eq(tradesTable.id, trade!.id));
