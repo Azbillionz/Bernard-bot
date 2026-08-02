@@ -44,6 +44,7 @@ import {
   handleFilters,
   handleSetFilter,
   handleToggleHoneypot,
+  handleToggleBuyMode,
   processFilterInput,
   getPendingFilter,
 } from "./handlers/filters";
@@ -171,7 +172,7 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
   bot.action("new_runners",    handleNewRunners);
   bot.action("trending",       handleTrending);
   bot.action("pumpfun",        handlePumpfun);
-    bot.action("pumpfun_stop",   handlePumpfunStop);
+  bot.action("pumpfun_stop",   handlePumpfunStop);
   bot.action("prev_signals",   handlePreviousSignals);
   bot.action("wallet_manager", handleWalletManager);
   bot.action("copy_trade",     handleCopyTrade);
@@ -180,10 +181,12 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
   bot.action("pnl_center",     handlePnlCenter);
   bot.action("my_trades",      handleMyTrades);
   bot.action("auto_snipe",     handleAutoSnipe);
-    bot.action("auto_snipe_toggle", handleAutoSnipeToggle);
+  bot.action("auto_snipe_toggle", handleAutoSnipeToggle);
   bot.action("settings",       handleSettings);
   bot.action("filters",        handleFilters);
   bot.action("toggle_honeypot",handleToggleHoneypot);
+  bot.action("toggle_buy_mode", handleToggleBuyMode);
+
   bot.action("manual_snipe",   handleManualSnipePrompt);
 
   bot.action(/^manual_snipe_start:(.+)$/, async (ctx) => {
