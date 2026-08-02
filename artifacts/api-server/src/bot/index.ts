@@ -24,6 +24,7 @@ import {
   processRenameInput,
   getPendingRename,
   handleActivateWallet,
+  handleToggleTradeable,
   handleExportKey,
   handleDeleteWallet,
   handleDeleteWalletConfirm,
@@ -308,9 +309,14 @@ export function createBot(redis: IORedis | null): Telegraf<Context> {
     await handleRenameWallet(ctx, id);
   });
 
-  bot.action(/^wallet_activate:(\d+)$/, async (ctx) => {
+    bot.action(/^wallet_activate:(\d+)$/, async (ctx) => {
     const id = parseInt((ctx.match as RegExpMatchArray)[1] ?? "0", 10);
     await handleActivateWallet(ctx, id);
+  });
+
+  bot.action(/^wallet_toggle_tradeable:(\d+)$/, async (ctx) => {
+    const id = parseInt((ctx.match as RegExpMatchArray)[1] ?? "0", 10);
+    await handleToggleTradeable(ctx, id);
   });
 
   bot.action(/^wallet_export:(\d+)$/, async (ctx) => {
