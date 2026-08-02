@@ -39,7 +39,7 @@ export async function handleHelpGuide(ctx: Context): Promise<void> {
       `<b>📡 Group Scanner</b>`,
       `• Auto-detect CAs in group messages`,
       ``,
-            `<b>Support:</b> @your_support_handle`,
+            `<b>Support:</b> @MAESTRO_1BOT_SUPPORT`,
     ].join("\n"),
     {
       parse_mode: "HTML",
