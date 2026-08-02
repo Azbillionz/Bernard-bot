@@ -1,5 +1,5 @@
 /**
- * QUANTREXTRADING_BOT — Telegraf bot initialization.
+ * REKTPROOF_BOT — Telegraf bot initialization.
  * Registers all command, callback_query, and text handlers.
  * Uses webhook in production, polling in development.
  */
