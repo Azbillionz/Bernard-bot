@@ -28,6 +28,7 @@ import { sendJitoBundle, getJitoTipLamports } from "../../services/jito";
 import { get1inchSwap } from "../../services/evmSwap";
 import { simulateEvmTx } from "../../services/flashbots";
 import { getPairsByToken } from "../../services/dexscreener";
+import { pickTradingWallet, markWalletUsed } from "../../services/walletRotation";
 import { searchGeckoToken } from "../../services/geckoTerminal";
 import { getPumpFunToken } from "../../services/pumpfunApi";
 import { getNativeTokenPrice } from "../../services/chainPrice";
@@ -153,13 +154,7 @@ async function executeBuy(ctx: Context, ca: string, amount: number): Promise<voi
   });
   if (!user) { await ctx.reply("❌ User not found. Type /start first."); return; }
 
-  const wallet = await db.query.walletsTable.findFirst({
-    where: and(
-      eq(walletsTable.userId, user.id),
-      eq(walletsTable.chain, user.activeChain),
-      eq(walletsTable.isActive, true)
-    ),
-  });
+    const wallet = await pickTradingWallet(user.id, user.activeChain);
   if (!wallet) {
     await ctx.reply(
       "❌ No active wallet for this chain. Add one in 💼 Wallet Manager.",
@@ -284,9 +279,10 @@ async function executeBuy(ctx: Context, ca: string, amount: number): Promise<voi
       txHash = tx.hash;
     }
 
-    await db.update(tradesTable)
+        await db.update(tradesTable)
       .set({ status: "CONFIRMED", txHash: txHash ?? undefined })
       .where(eq(tradesTable.id, trade!.id));
+    void markWalletUsed(wallet.id);
 
     await ctx.reply(
       [
@@ -368,13 +364,7 @@ export async function triggerAutoSnipeBuy(params: AutoSnipeParams): Promise<void
       .catch(() => undefined);
 
   try {
-    const wallet = await db.query.walletsTable.findFirst({
-      where: and(
-        eq(walletsTable.userId, dbUserId),
-        eq(walletsTable.chain, "SOL"),
-        eq(walletsTable.isActive, true)
-      ),
-    });
+        const wallet = await pickTradingWallet(dbUserId, "SOL");
     if (!wallet) {
       await send(`⚡ <b>Auto-Snipe skipped</b> — no active SOL wallet.\n🪙 Token: <b>${symbolSafe}</b> <code>${ca}</code>`);
       return;
