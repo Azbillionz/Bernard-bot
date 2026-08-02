@@ -30,7 +30,7 @@ export async function handleBotStats(ctx: Context): Promise<void> {
 
   await ctx.editMessageText(
     [
-      `📊 <b>Bot Stats — QUANTREXTRADING_BOT</b>`,
+            `📊 <b>Bot Stats — RektProof Bot</b>`,
       `—`,
       `👥 Total Users: <b>${userRow?.c ?? 0}</b>`,
       `🔁 Total Trades: <b>${tradeRow?.c ?? 0}</b>`,
