@@ -21,6 +21,7 @@ import { getPairsByToken } from "../../services/dexscreener";
 import { searchGeckoToken } from "../../services/geckoTerminal";
 import { getPumpFunToken } from "../../services/pumpfunApi";
 import { getNativeTokenPrice, getChainBalance } from "../../services/chainPrice";
+import { computeBuyAmount } from "../../services/positionSizing";
 import { checkEvmToken, checkSolanaToken } from "../../services/goplus";
 import { stopSnipeTracking } from "../../services/snipeMonitor";
 import { queuePendingAutoSnipe } from "../../services/pendingSnipeQueue";
@@ -281,12 +282,11 @@ export async function handleStartManualSnipe(ctx: Context, ca: string): Promise<
   }
 
   const config = await db.query.sniperConfigsTable.findFirst({ where: eq(sniperConfigsTable.userId, user.id) });
-  const buyAmount = config?.autoBuyAmountNative ?? "0.1";
-  const buyAmountNum = parseFloat(buyAmount);
-
   const balance = parseFloat(await getChainBalance(user.activeChain, wallet.address).catch(() => "0"));
+  const buyAmountNum = computeBuyAmount(config, user.activeChain, balance);
+  const buyAmount = String(buyAmountNum);
 
-  if (balance < buyAmountNum) {
+  if (buyAmountNum <= 0 || balance < buyAmountNum) {
     const metrics = await fetchQuickMetrics(ca, user.activeChain);
     await ctx.reply(
       [
@@ -402,7 +402,15 @@ export async function handleSnipeConfirmPreview(ctx: Context, target: string): P
   };
   const scoreResult = scoreToken(scoreInput);
 
-  const buyAmountNative = parseFloat(config?.autoBuyAmountNative ?? "0.1");
+    const buyAmountNative = await (async () => {
+    const wallet = await db.query.walletsTable.findFirst({
+      where: and(eq(walletsTable.userId, user.id), eq(walletsTable.chain, chain), eq(walletsTable.isActive, true)),
+    });
+    const balance = wallet
+      ? parseFloat(await getChainBalance(chain, wallet.address).catch(() => "0"))
+      : 0;
+    return computeBuyAmount(config, chain, balance);
+  })();
   const nativePrice = Number(await getNativeTokenPrice(chain).catch(() => 0));
   const buyAmountUsd = buyAmountNative * nativePrice;
 
