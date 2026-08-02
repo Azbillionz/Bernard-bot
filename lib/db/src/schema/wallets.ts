@@ -11,6 +11,11 @@ export const walletsTable = pgTable("bot_wallets", {
   encryptedPrivateKey: text("encrypted_private_key").notNull(),
   label: text("label").notNull().default("Main Wallet"),
   isActive: boolean("is_active").notNull().default(true),
+  // Separate from isActive: multiple wallets per chain can be isTradeable
+  // at once, so snipes rotate between them instead of always using the
+  // single "active" wallet. lastUsedAt drives the rotation (oldest first).
+  isTradeable: boolean("is_tradeable").notNull().default(false),
+  lastUsedAt: timestamp("last_used_at").notNull().defaultNow(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
