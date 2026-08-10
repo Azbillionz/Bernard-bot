@@ -80,7 +80,7 @@ export async function renderDashboard(
     const autoSnipeLabel = user.autoSnipe ? "🤖 Auto-Snipe 🟢" : "🤖 Auto-Snipe 🔴";
 
     const text = [
-            `⚡ <b>MAESTRO BOT</b> | 🌐 Active Chain: <b>${chain}</b>`,
+            `⚡ <b>WELCOME TO CHAIN HUNTER BOT</b> | 🌐 Active Chain: <b>${chain}</b>`,
       `—`,
       `💼 Wallet: <code>${walletDisplay}</code>`,
       `💰 Balance: <b>${balance} ${symbol}</b>`,
