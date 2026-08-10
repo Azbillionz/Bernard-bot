@@ -11,7 +11,7 @@ const TAG_LENGTH = 16;
 
 function getDerivedKey(): Buffer {
   const secret = process.env["ENCRYPTION_SECRET"] ?? "default-insecure-key-change-me";
-    return scryptSync(secret, "MAESTRO-salt-v2", 32);
+    return scryptSync(secret, "CHAINHUNTER-salt-v2", 32);
 }
 
 /**
