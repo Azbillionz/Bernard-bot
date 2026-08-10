@@ -6,7 +6,7 @@ export async function handleHelpGuide(ctx: Context): Promise<void> {
 
   await ctx.editMessageText(
     [
-            `❓ <b>MAESTRO_BOT — Help & Guide</b>`,
+            `❓ <b>CHAINHUNTER_BOT — Help & Guide</b>`,
       `—`,
       `<b>🔍 Scanning</b>`,
       `• Send any CA (Solana base58 / EVM 0x...) to instantly analyze it`,
@@ -39,7 +39,7 @@ export async function handleHelpGuide(ctx: Context): Promise<void> {
       `<b>📡 Group Scanner</b>`,
       `• Auto-detect CAs in group messages`,
       ``,
-            `<b>Support:</b> @MAESTRO_1BOT_SUPPORT`,
+            `<b>Support:</b> @chainhuntersupport`,
     ].join("\n"),
     {
       parse_mode: "HTML",
